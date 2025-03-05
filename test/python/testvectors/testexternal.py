@@ -3,23 +3,22 @@ External module tests
 """
 
 import os
-import pickle
 import unittest
 
 import numpy as np
 
-from txtai.vectors import ExternalVectors, VectorsFactory
+from txtai.vectors import External, VectorsFactory
 
 
-class TestExternalVectors(unittest.TestCase):
+class TestExternal(unittest.TestCase):
     """
-    ExternalVectors tests
+    External vectors tests
     """
 
     @classmethod
     def setUpClass(cls):
         """
-        Create single ExternalVectors instance.
+        Create External vectors instance.
         """
 
         cls.model = VectorsFactory.create({"method": "external"}, None)
@@ -30,7 +29,7 @@ class TestExternalVectors(unittest.TestCase):
         """
 
         # Generate dummy data
-        data = np.random.rand(1000, 768)
+        data = np.random.rand(1000, 768).astype(np.float32)
 
         # Generate enough volume to test batching
         documents = [(x, data[x], None) for x in range(1000)]
@@ -44,7 +43,7 @@ class TestExternalVectors(unittest.TestCase):
 
         # Test shape of serialized embeddings
         with open(stream, "rb") as queue:
-            self.assertEqual(pickle.load(queue).shape, (500, 768))
+            self.assertEqual(np.load(queue).shape, (500, 768))
 
     def testMethod(self):
         """
@@ -52,4 +51,4 @@ class TestExternalVectors(unittest.TestCase):
         """
 
         model = VectorsFactory.create({"transform": lambda x: x}, None)
-        self.assertTrue(isinstance(model, ExternalVectors))
+        self.assertTrue(isinstance(model, External))

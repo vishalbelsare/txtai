@@ -85,6 +85,8 @@ class TestExtension(unittest.TestCase):
         with open(config, "w", encoding="utf-8") as output:
             output.write(PIPELINES)
 
+        # Create new application and set on client
+        application.app = application.create()
         client = TestClient(application.app)
         application.start()
 
@@ -100,7 +102,7 @@ class TestExtension(unittest.TestCase):
 
     def testEmpty(self):
         """
-        Tests an empty extension
+        Test an empty extension
         """
 
         extension = Extension()
@@ -108,7 +110,7 @@ class TestExtension(unittest.TestCase):
 
     def testExtension(self):
         """
-        Tests a pipeline extension
+        Test a pipeline extension
         """
 
         text = self.client.get("sample?text=Test%20String").json()

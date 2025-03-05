@@ -31,7 +31,7 @@ class HFModel(Tensors):
 
         # Get tensor device reference
         self.deviceid = Models.deviceid(gpu)
-        self.device = Models.reference(self.deviceid)
+        self.device = Models.device(self.deviceid)
 
         # Process batch size
         self.batchsize = batch
@@ -109,17 +109,3 @@ class HFModel(Tensors):
 
         # pylint: disable=E1102
         return ({name: self.tensor(tensor).to(self.device) for name, tensor in tokens.items()}, indices)
-
-    def batch(self, texts, size):
-        """
-        Splits texts into separate batch sizes specified by size.
-
-        Args:
-            texts: text elements
-            size: batch size
-
-        Returns:
-            list of evenly sized batches with the last batch having the remaining elements
-        """
-
-        return [texts[x : x + size] for x in range(0, len(texts), size)]

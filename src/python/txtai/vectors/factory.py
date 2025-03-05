@@ -2,9 +2,15 @@
 Factory module
 """
 
-from .external import ExternalVectors
-from .transformers import TransformersVectors
-from .words import WordVectors, WORDS
+from ..util import Resolver
+
+from .external import External
+from .huggingface import HFVectors
+from .litellm import LiteLLM
+from .llama import LlamaCpp
+from .m2v import Model2Vec
+from .sbert import STVectors
+from .words import WordVectors
 
 
 class VectorsFactory:
@@ -13,13 +19,14 @@ class VectorsFactory:
     """
 
     @staticmethod
-    def create(config, scoring):
+    def create(config, scoring=None, models=None):
         """
         Create a Vectors model instance.
 
         Args:
             config: vector configuration
             scoring: scoring instance
+            models: models cache
 
         Returns:
             Vectors
@@ -27,20 +34,37 @@ class VectorsFactory:
 
         # Determine vector method
         method = VectorsFactory.method(config)
+
+        # External vectors
         if method == "external":
-            return ExternalVectors(config, scoring)
+            return External(config, scoring, models)
 
+        # LiteLLM vectors
+        if method == "litellm":
+            return LiteLLM(config, scoring, models)
+
+        # llama.cpp vectors
+        if method == "llama.cpp":
+            return LlamaCpp(config, scoring, models)
+
+        # Model2vec vectors
+        if method == "model2vec":
+            return Model2Vec(config, scoring, models)
+
+        # Sentence Transformers vectors
+        if method == "sentence-transformers":
+            return STVectors(config, scoring, models) if config and config.get("path") else None
+
+        # Word vectors
         if method == "words":
-            if not WORDS:
-                # Raise error if trying to create Word Vectors without similarity extra
-                raise ImportError(
-                    'Word vector models are not available - install "similarity" extra to enable. Otherwise, specify '
-                    + 'method="transformers" to use transformer backed models'
-                )
+            return WordVectors(config, scoring, models)
 
-            return WordVectors(config, scoring)
+        # Transformers vectors
+        if HFVectors.ismethod(method):
+            return HFVectors(config, scoring, models) if config and config.get("path") else None
 
-        return TransformersVectors(config, scoring)
+        # Resolve custom method
+        return VectorsFactory.resolve(method, config, scoring, models) if method else None
 
     @staticmethod
     def method(config):
@@ -54,15 +78,44 @@ class VectorsFactory:
             vector method
         """
 
-        # Determine vector type (external, transformers or words)
+        # Determine vector method
         method = config.get("method")
         path = config.get("path")
 
         # Infer method from path, if blank
         if not method:
             if path:
-                method = "words" if WordVectors.isdatabase(path) else "transformers"
+                if LiteLLM.ismodel(path):
+                    method = "litellm"
+                elif LlamaCpp.ismodel(path):
+                    method = "llama.cpp"
+                elif Model2Vec.ismodel(path):
+                    method = "model2vec"
+                elif WordVectors.ismodel(path):
+                    method = "words"
+                else:
+                    method = "transformers"
             elif config.get("transform"):
                 method = "external"
 
         return method
+
+    @staticmethod
+    def resolve(backend, config, scoring, models):
+        """
+        Attempt to resolve a custom backend.
+
+        Args:
+            backend: backend class
+            config: vector configuration
+            scoring: scoring instance
+            models: models cache
+
+        Returns:
+            Vectors
+        """
+
+        try:
+            return Resolver()(backend)(config, scoring, models)
+        except Exception as e:
+            raise ImportError(f"Unable to resolve vectors backend: '{backend}'") from e

@@ -4,19 +4,13 @@ Textractor module
 
 import contextlib
 import os
+import tempfile
 
-from subprocess import Popen
-from urllib.request import urlopen
+from urllib.parse import urlparse
+from urllib.request import urlopen, Request
 
-# Conditional import
-try:
-    from bs4 import BeautifulSoup
-    from tika import parser
-
-    TIKA = True
-except ImportError:
-    TIKA = False
-
+from .filetohtml import FileToHTML
+from .htmltomd import HTMLToMarkdown
 from .segmentation import Segmentation
 
 
@@ -25,54 +19,121 @@ class Textractor(Segmentation):
     Extracts text from files.
     """
 
-    def __init__(self, sentences=False, lines=False, paragraphs=False, minlength=None, join=False, tika=True):
-        if not TIKA:
-            raise ImportError('Textractor pipeline is not available - install "pipeline" extra to enable')
+    # pylint: disable=R0913
+    def __init__(
+        self,
+        sentences=False,
+        lines=False,
+        paragraphs=False,
+        minlength=None,
+        join=False,
+        sections=False,
+        cleantext=True,
+        chunker=None,
+        headers=None,
+        backend="available",
+        **kwargs
+    ):
+        super().__init__(sentences, lines, paragraphs, minlength, join, sections, cleantext, chunker, **kwargs)
 
-        super().__init__(sentences, lines, paragraphs, minlength, join)
+        # Get backend parameter - handle legacy tika flag
+        backend = "tika" if "tika" in kwargs and kwargs["tika"] else None if "tika" in kwargs else backend
 
-        # Determine if Tika (default if Java is available) or Beautiful Soup should be used
-        # Beautiful Soup only supports HTML, Tika supports a wide variety of file formats, including HTML.
-        self.tika = self.checkjava() if tika else False
+        # File to HTML pipeline
+        self.html = FileToHTML(backend) if backend else None
+
+        # HTML to Markdown pipeline
+        self.markdown = HTMLToMarkdown(self.paragraphs, self.sections)
+
+        # HTTP headers
+        self.headers = headers if headers else {}
 
     def text(self, text):
-        # Use Tika if available
-        if self.tika:
-            # Format file urls as local file paths
-            text = text.replace("file://", "")
+        # Check if text is a valid file path or url
+        path, exists = self.valid(text)
 
-            # text is a path to a file
-            parsed = parser.from_file(text)
-            return parsed["content"]
+        if not path:
+            # Not a valid file path, treat input as data
+            html = text
 
-        # Fallback to Beautiful Soup
-        text = f"file://{text}" if os.path.exists(text) else text
-        with contextlib.closing(urlopen(text)) as connection:
-            text = connection.read()
+        elif self.html:
+            # Use FileToHTML pipeline, if available
+            # Retrieve remote file, if necessary
+            path = path if exists else self.download(path)
 
-        soup = BeautifulSoup(text, features="html.parser")
-        return soup.get_text()
+            # Parse content to HTML
+            html = self.html(path)
 
-    def checkjava(self, path=None):
+            # FiletoHTML pipeline returns None when input is already HTML
+            html = html if html else self.retrieve(path)
+
+            # Delete temporary file
+            if not exists:
+                os.remove(path)
+
+        else:
+            # Read data from url/path
+            html = self.retrieve(path)
+
+        # HTML to Markdown
+        return self.markdown(html)
+
+    def valid(self, path):
         """
-        Checks if a Java executable is available for Tika.
+        Checks if path is a valid local file or web url. Returns path if valid along with a flag
+        denoting if the path exists locally.
 
         Args:
-            path: path to java executable
+            path: path to check
 
         Returns:
-            True if Java is available, False otherwise
+            (path, exists)
         """
 
-        # Get path to java executable if path not set
-        if not path:
-            path = os.getenv("TIKA_JAVA", "java")
+        # Convert file urls to local paths
+        path = path.replace("file://", "")
 
-        # pylint: disable=R1732,W0702,W1514
-        # Check if java binary is available on path
-        try:
-            _ = Popen(path, stdout=open(os.devnull, "w"), stderr=open(os.devnull, "w"))
-        except:
-            return False
+        # Check if this is a local file path or local file url
+        exists = os.path.exists(path)
 
-        return True
+        # Consider local files and HTTP urls valid
+        return (path if exists or urlparse(path).scheme in ("http", "https") else None, exists)
+
+    def download(self, url):
+        """
+        Downloads content of url to a temporary file.
+
+        Args:
+            url: input url
+
+        Returns:
+            temporary file path
+        """
+
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False) as output:
+            path = output.name
+
+            # Retrieve and write data to temporary file
+            output.write(self.retrieve(url))
+
+        return path
+
+    def retrieve(self, url):
+        """
+        Retrieves content from url.
+
+        Args:
+            url: input url
+
+        Returns:
+            data
+        """
+
+        # Local file
+        if os.path.exists(url):
+            with open(url, "rb") as f:
+                return f.read()
+
+        # Remote file
+        with contextlib.closing(urlopen(Request(url, headers=self.headers))) as connection:
+            return connection.read()

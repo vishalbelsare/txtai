@@ -1,5 +1,5 @@
 """
-Tests encoding/decoding database objects
+Test encoding/decoding database objects
 """
 
 import glob
@@ -48,26 +48,32 @@ class TestEncoder(unittest.TestCase):
 
     def testDefault(self):
         """
-        Tests an index with default encoder
+        Test an index with default encoder
         """
 
         try:
             # Set default encoder
             self.embeddings.config["objects"] = True
-            data = [(0, {"object": bytearray([1, 2, 3]), "text": "default test"}, None)]
 
-            # Create an index
-            self.embeddings.index(data)
+            # Test all database providers
+            for content in ["duckdb", "sqlite"]:
+                self.embeddings.config["content"] = content
 
-            result = self.embeddings.search("select object from txtai limit 1")[0]
+                data = [(0, {"object": bytearray([1, 2, 3]), "text": "default test"}, None)]
 
-            self.assertEqual(result["object"].getvalue(), bytearray([1, 2, 3]))
+                # Create an index
+                self.embeddings.index(data)
+
+                result = self.embeddings.search("select object from txtai limit 1")[0]
+
+                self.assertEqual(result["object"].getvalue(), bytearray([1, 2, 3]))
         finally:
             self.embeddings.config["objects"] = "image"
+            self.embeddings.config["content"] = True
 
     def testImages(self):
         """
-        Tests an index with image encoder
+        Test an index with image encoder
         """
 
         # Create an index for the list of images
@@ -80,7 +86,7 @@ class TestEncoder(unittest.TestCase):
 
     def testPickle(self):
         """
-        Tests an index with pickle encoder
+        Test an index with pickle encoder
         """
 
         try:
@@ -99,7 +105,7 @@ class TestEncoder(unittest.TestCase):
 
     def testReindex(self):
         """
-        Tests reindex with objects
+        Test reindex with objects
         """
 
         # Create an index for the list of images
@@ -115,7 +121,7 @@ class TestEncoder(unittest.TestCase):
 
     def testReindexFunction(self):
         """
-        Tests reindex with objects and a function
+        Test reindex with objects and a function
         """
 
         try:

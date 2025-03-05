@@ -6,7 +6,15 @@ import os
 
 import torch
 
-from transformers import AutoModel, AutoModelForQuestionAnswering, AutoModelForSeq2SeqLM, AutoModelForSequenceClassification
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForQuestionAnswering,
+    AutoModelForSeq2SeqLM,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+)
+from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 from .onnx import OnnxModel
 
@@ -24,8 +32,8 @@ class Models:
         with older tokenizers.
 
         Args:
-            config: Transformers config
-            tokenizer: Transformers tokenizer
+            config: transformers config
+            tokenizer: transformers tokenizer
         """
 
         # Unpack nested config, handles passing model directly
@@ -41,19 +49,45 @@ class Models:
             tokenizer.model_max_length = config.max_position_embeddings
 
     @staticmethod
-    def deviceid(gpu):
+    def maxlength(config, tokenizer):
         """
-        Translates a gpu flag into a device id.
+        Gets the best max length to use for generate calls. This method will return config.max_length if it's set. Otherwise, it will return
+        tokenizer.model_max_length.
 
         Args:
-            gpu: True/False if GPU should be enabled, also supports a GPU device id
+            config: transformers config
+            tokenizer: transformers tokenizer
+        """
+
+        # Unpack nested config, handles passing model directly
+        if hasattr(config, "config"):
+            config = config.config
+
+        # Get non-defaulted fields
+        keys = config.to_diff_dict()
+
+        # Use config.max_length if not set to default value, else use tokenizer.model_max_length if available
+        return config.max_length if "max_length" in keys or not hasattr(tokenizer, "model_max_length") else tokenizer.model_max_length
+
+    @staticmethod
+    def deviceid(gpu):
+        """
+        Translates input gpu argument into a device id.
+
+        Args:
+            gpu: True/False if GPU should be enabled, also supports a device id/string/instance
 
         Returns:
             device id
         """
 
-        # Always return -1 if gpu is None or CUDA is unavailable
-        if gpu is None or not torch.cuda.is_available():
+        # Return if this is already a torch device
+        # pylint: disable=E1101
+        if isinstance(gpu, torch.device):
+            return gpu
+
+        # Always return -1 if gpu is None or an accelerator device is unavailable
+        if gpu is None or not Models.hasaccelerator():
             return -1
 
         # Default to device 0 if gpu is True and not otherwise specified
@@ -77,7 +111,7 @@ class Models:
 
         # Torch device
         # pylint: disable=E1101
-        return torch.device(Models.reference(deviceid))
+        return deviceid if isinstance(deviceid, torch.device) else torch.device(Models.reference(deviceid))
 
     @staticmethod
     def reference(deviceid):
@@ -91,10 +125,62 @@ class Models:
             device reference
         """
 
-        return "cpu" if deviceid < 0 else f"cuda:{deviceid}"
+        return (
+            deviceid
+            if isinstance(deviceid, str)
+            else (
+                "cpu"
+                if deviceid < 0
+                else f"cuda:{deviceid}" if torch.cuda.is_available() else "mps" if Models.hasmpsdevice() else Models.finddevice()
+            )
+        )
 
     @staticmethod
-    def load(path, config=None, task="default"):
+    def acceleratorcount():
+        """
+        Gets the number of accelerator devices available.
+
+        Returns:
+            number of accelerators available
+        """
+
+        return max(torch.cuda.device_count(), int(Models.hasaccelerator()))
+
+    @staticmethod
+    def hasaccelerator():
+        """
+        Checks if there is an accelerator device available.
+
+        Returns:
+            True if an accelerator device is available, False otherwise
+        """
+
+        return torch.cuda.is_available() or Models.hasmpsdevice() or bool(Models.finddevice())
+
+    @staticmethod
+    def hasmpsdevice():
+        """
+        Checks if there is a MPS device available.
+
+        Returns:
+            True if a MPS device is available, False otherwise
+        """
+
+        return os.environ.get("PYTORCH_MPS_DISABLE") != "1" and torch.backends.mps.is_available()
+
+    @staticmethod
+    def finddevice():
+        """
+        Attempts to find an alternative accelerator device.
+
+        Returns:
+            name of first alternative accelerator available or None if not found
+        """
+
+        return next((device for device in ["xpu"] if hasattr(torch, device) and getattr(torch, device).is_available()), None)
+
+    @staticmethod
+    def load(path, config=None, task="default", modelargs=None):
         """
         Loads a machine learning model. Handles multiple model frameworks (ONNX, Transformers).
 
@@ -124,5 +210,59 @@ class Models:
             "zero-shot-classification": AutoModelForSequenceClassification.from_pretrained,
         }
 
+        # Pass modelargs as keyword arguments
+        modelargs = modelargs if modelargs else {}
+
         # Load model for supported tasks. Return path for unsupported tasks.
-        return models[task](path) if task in models else path
+        return models[task](path, **modelargs) if task in models else path
+
+    @staticmethod
+    def tokenizer(path, **kwargs):
+        """
+        Loads a tokenizer from path.
+
+        Args:
+            path: path to tokenizer
+            kwargs: optional additional keyword arguments
+
+        Returns:
+            tokenizer
+        """
+
+        return AutoTokenizer.from_pretrained(path, **kwargs) if isinstance(path, str) else path
+
+    @staticmethod
+    def task(path, **kwargs):
+        """
+        Attempts to detect the model task from path.
+
+        Args:
+            path: path to model
+            kwargs: optional additional keyword arguments
+
+        Returns:
+            inferred model task
+        """
+
+        # Get model configuration
+        config = None
+        if isinstance(path, (list, tuple)) and hasattr(path[0], "config"):
+            config = path[0].config
+        elif isinstance(path, str):
+            config = AutoConfig.from_pretrained(path, **kwargs)
+
+        # Attempt to resolve task using configuration
+        task = None
+        if config:
+            architecture = config.architectures[0] if config.architectures else None
+            if architecture:
+                if architecture in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES.values():
+                    task = "vision"
+                elif any(x for x in ["LMHead", "CausalLM"] if x in architecture):
+                    task = "language-generation"
+                elif "QuestionAnswering" in architecture:
+                    task = "question-answering"
+                elif "ConditionalGeneration" in architecture:
+                    task = "sequence-sequence"
+
+        return task

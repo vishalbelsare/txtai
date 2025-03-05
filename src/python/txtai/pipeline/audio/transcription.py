@@ -2,111 +2,211 @@
 Transcription module
 """
 
+import numpy as np
+
+# Conditional import
 try:
     import soundfile as sf
 
-    SOUNDFILE = True
+    from .signal import Signal, SCIPY
+
+    TRANSCRIPTION = SCIPY
 except (ImportError, OSError):
-    SOUNDFILE = False
+    TRANSCRIPTION = False
 
-from transformers import AutoModelForCTC, Wav2Vec2Processor
-
-from ..hfmodel import HFModel
+from ..hfpipeline import HFPipeline
 
 
-class Transcription(HFModel):
+class Transcription(HFPipeline):
     """
-    Transcribes audio files to text.
+    Transcribes audio files or data to text.
     """
 
-    def __init__(self, path="facebook/wav2vec2-base-960h", quantize=False, gpu=True, batch=64):
-        """
-        Constructs a new transcription pipeline.
-
-        Args:
-            path: optional path to model, accepts Hugging Face model hub id or local path,
-                  uses default model for task if not provided
-            quantize: if model should be quantized, defaults to False
-            gpu: True/False if GPU should be enabled, also supports a GPU device id
-            batch: batch size used to incrementally process content
-        """
+    def __init__(self, path=None, quantize=False, gpu=True, model=None, **kwargs):
+        if not TRANSCRIPTION:
+            raise ImportError(
+                'Transcription pipeline is not available - install "pipeline" extra to enable. Also check that libsndfile is available.'
+            )
 
         # Call parent constructor
-        super().__init__(path, quantize, gpu, batch)
+        super().__init__("automatic-speech-recognition", path, quantize, gpu, model, **kwargs)
 
-        if not SOUNDFILE:
-            raise ImportError("SoundFile library not installed or libsndfile not found")
-
-        # load model and processor
-        self.model = AutoModelForCTC.from_pretrained(self.path)
-        self.processor = Wav2Vec2Processor.from_pretrained(self.path)
-
-        # Move model to device
-        self.model.to(self.device)
-
-    def __call__(self, files):
+    def __call__(self, audio, rate=None, chunk=10, join=True, **kwargs):
         """
-        Transcribes audio files to text.
+        Transcribes audio files or data to text.
 
-        This method supports files as a string or a list. If the input is a string,
-        the return type is string. If text is a list, the return type is a list.
+        This method supports a single audio element or a list of audio. If the input is audio, the return
+        type is a string. If text is a list, a list of strings is returned
 
         Args:
-            files: text|list
+            audio: audio|list
+            rate: sample rate, only required with raw audio data
+            chunk: process audio in chunk second sized segments
+            join: if True (default), combine each chunk back together into a single text output.
+                  When False, chunks are returned as a list of dicts, each having raw associated audio and
+                  sample rate in addition to text
+            kwargs: generate keyword arguments
 
         Returns:
             list of transcribed text
         """
 
-        values = [files] if not isinstance(files, list) else files
+        # Convert single element to list
+        values = [audio] if self.isaudio(audio) else audio
 
-        # Parse audio files
-        speech = [sf.read(f) for f in values]
+        # Read input audio
+        speech = self.read(values, rate)
 
-        # Get unique list of sampling rates
-        unique = set(s[1] for s in speech)
+        # Apply transformation rules and store results
+        results = self.batchprocess(speech, chunk, **kwargs) if chunk and not join else self.process(speech, chunk, **kwargs)
 
-        results = {}
-        for sampling in unique:
-            # Get inputs for current sampling rate
-            inputs = [(x, s[0]) for x, s in enumerate(speech) if s[1] == sampling]
+        # Return single element if single element passed in
+        return results[0] if self.isaudio(audio) else results
 
-            # Transcribe in batches
-            outputs = []
-            for chunk in self.batch([s for _, s in inputs], self.batchsize):
-                outputs.extend(self.transcribe(chunk, sampling))
-
-            # Store output value
-            for y, (x, _) in enumerate(inputs):
-                results[x] = outputs[y].capitalize()
-
-        # Return results in same order as input
-        results = [results[x] for x in sorted(results)]
-        return results[0] if isinstance(files, str) else results
-
-    def transcribe(self, speech, sampling):
+    def isaudio(self, audio):
         """
-        Transcribes audio to text.
+        Checks if input is a single audio element.
 
         Args:
-            speech: list of audio
-            sampling: sampling rate
+            audio: audio|list
+
+        Returns:
+            True if input is an audio element, False otherwise
+        """
+
+        return isinstance(audio, (str, tuple, np.ndarray)) or hasattr(audio, "read")
+
+    def read(self, audio, rate):
+        """
+        Read audio to raw waveforms and sample rates.
+
+        Args:
+            audio: audio|list
+            rate: optional sample rate
+
+        Returns:
+            list of (audio data, sample rate)
+        """
+
+        speech = []
+        for x in audio:
+            if isinstance(x, str) or hasattr(x, "read"):
+                # Read file or file-like object
+                raw, samplerate = sf.read(x)
+            elif isinstance(x, tuple):
+                # Input is NumPy array and sample rate
+                raw, samplerate = x
+            else:
+                # Input is NumPy array
+                raw, samplerate = x, rate
+
+            speech.append((raw, samplerate))
+
+        return speech
+
+    def process(self, speech, chunk, **kwargs):
+        """
+        Standard processing loop. Runs a single pipeline call for all speech inputs along
+        with the chunk size. Returns text for each input.
+
+        Args:
+            speech: list of (audio data, sample rate)
+            chunk: split audio into chunk seconds sized segments for processing
+            kwargs: generate keyword arguments
 
         Returns:
             list of transcribed text
         """
 
-        with self.context():
-            # Convert samples to features
-            inputs = self.processor(speech, sampling_rate=sampling, padding=True, return_tensors=self.tensortype()).input_values
+        results = []
+        for result in self.pipeline([self.convert(*x) for x in speech], chunk_length_s=chunk, ignore_warning=True, generate_kwargs=kwargs):
+            # Store result
+            results.append(self.clean(result["text"]))
 
-            # Place inputs on tensor device
-            inputs = inputs.to(self.device)
+        return results
 
-            # Retrieve logits
-            logits = self.model(inputs).logits
+    def batchprocess(self, speech, chunk, **kwargs):
+        """
+        Batch processing loop. Runs a pipeline call per speech input. Each speech input is split
+        into chunk duration segments. Each segment is individually transcribed and returned along with
+        the raw wav snippets.
 
-            # Decode argmax
-            ids = self.argmax(logits, dimension=-1)
+        Args:
+            speech: list of (audio data, sample rate)
+            chunk: split audio into chunk seconds sized segments for processing
+            kwargs: generate keyword arguments
 
-            return self.processor.batch_decode(ids)
+        Returns:
+            list of lists of dicts - each dict has text, raw wav data for text and sample rate
+        """
+
+        results = []
+
+        # Process each element individually to get time-sliced chunks
+        for raw, rate in speech:
+            # Get segments for current speech entry
+            segments = self.segments(raw, rate, chunk)
+
+            # Process segments, store raw data before processing given pipeline modifies it
+            sresults = []
+            for x, result in enumerate(self.pipeline([self.convert(*x) for x in segments], generate_kwargs=kwargs)):
+                sresults.append({"text": self.clean(result["text"]), "raw": segments[x][0], "rate": segments[x][1]})
+
+            results.append(sresults)
+
+        return results
+
+    def segments(self, raw, rate, chunk):
+        """
+        Builds chunk duration batches.
+
+        Args:
+            raw: raw audio data
+            rate: sample rate
+            chunk: chunk duration size
+        """
+
+        segments = []
+
+        # Split into batches, use sample rate * chunk seconds
+        for segment in self.batch(raw, rate * chunk):
+            segments.append((segment, rate))
+
+        return segments
+
+    def convert(self, raw, rate):
+        """
+        Converts input audio to mono with a sample rate equal to the pipeline model's
+        sample rate.
+
+        Args:
+            raw: raw audio data
+            rate: target sample rate
+
+        Returns:
+            audio data ready for pipeline model
+        """
+
+        # Convert stereo to mono, if necessary
+        raw = Signal.mono(raw)
+
+        # Resample to target sample rate
+        target = self.pipeline.feature_extractor.sampling_rate
+        return {"raw": Signal.resample(raw, rate, target), "sampling_rate": target}
+
+    def clean(self, text):
+        """
+        Applies text normalization rules.
+
+        Args:
+            text: input text
+
+        Returns:
+            clean text
+        """
+
+        # Trim whitespace
+        text = text.strip()
+
+        # Convert all upper case strings to capitalized case
+        return text.capitalize() if text.isupper() else text

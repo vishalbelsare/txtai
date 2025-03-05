@@ -30,13 +30,29 @@ Path to save and load the embeddings index. Each API instance can only access a 
 
 ### writable
 ```yaml
-path: boolean
+writable: boolean
 ```
 
 Determines if the input embeddings index is writable (true) or read-only (false). This allows serving a read-only index.
 
 ### cloud
-[Cloud storage settings](../../embeddings/configuration#cloud) can be set under a `cloud` top level configuration group.
+[Cloud storage settings](../../embeddings/configuration/cloud) can be set under a `cloud` top level configuration group.
+
+## Agent
+
+Agents are defined under a top level `agent` key. Each key under the `agent` key is the name of the agent. Constructor parameters can be passed under this key.
+
+The following example defines an agent.
+
+```yaml
+agent:
+    researcher:
+        tools:
+            - websearch
+
+llm:
+    path: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+```
 
 ## Pipeline
 

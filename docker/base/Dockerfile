@@ -1,11 +1,14 @@
 # Set base image
-ARG BASE_IMAGE=ubuntu:20.04
+ARG BASE_IMAGE=python:3.9-slim
 FROM $BASE_IMAGE
 
 # Install GPU-enabled version of PyTorch if set
 ARG GPU
 
-# Set Python version (i.e. 3, 3.7, 3.8)
+# Target CPU architecture
+ARG TARGETARCH
+
+# Set Python version (i.e. 3, 3.9)
 ARG PYTHON_VERSION=3
 
 # List of txtai components to install
@@ -18,15 +21,15 @@ ENV LANG=C.UTF-8
 RUN \
     # Install required packages
     apt-get update && \
-    apt-get -y --no-install-recommends install libgomp1 libsndfile1 gcc g++ python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python3-pip && \
+    apt-get -y --no-install-recommends install libgomp1 libportaudio2 libsndfile1 gcc g++ python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python3-pip && \
     rm -rf /var/lib/apt/lists && \
     \
     # Install txtai project and dependencies
     ln -s /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
     python -m pip install --no-cache-dir -U pip wheel setuptools && \
-    if [ -z ${GPU} ]; then pip install --no-cache-dir pip install torch==1.11.0+cpu torchvision==0.12.0+cpu -f https://download.pytorch.org/whl/torch_stable.html; fi && \
+    if [ -z ${GPU} ] && { [ -z ${TARGETARCH} ] || [ ${TARGETARCH} = "amd64" ] ;}; then pip install --no-cache-dir torch==2.6.0+cpu torchvision==0.21.0+cpu -f https://download.pytorch.org/whl/torch -f https://download.pytorch.org/whl/torchvision; fi && \
     python -m pip install --no-cache-dir txtai${COMPONENTS} && \
-    python -c "import sys, importlib.util as util; 1 if util.find_spec('nltk') else sys.exit(); import nltk; nltk.download('punkt')" && \
+    python -c "import sys, importlib.util as util; 1 if util.find_spec('nltk') else sys.exit(); import nltk; nltk.download(['punkt', 'punkt_tab', 'averaged_perceptron_tagger_eng'])" && \
     \
     # Cleanup build packages
     apt-get -y purge gcc g++ python${PYTHON_VERSION}-dev && apt-get -y autoremove

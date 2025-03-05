@@ -9,18 +9,18 @@ from tempfile import NamedTemporaryFile
 
 # Conditional import
 try:
-    from onnxruntime import GraphOptimizationLevel, InferenceSession, SessionOptions
     from onnxruntime.quantization import quantize_dynamic
 
     ONNX_RUNTIME = True
 except ImportError:
     ONNX_RUNTIME = False
 
+from torch import nn
 from torch.onnx import export
 
 from transformers import AutoModel, AutoModelForQuestionAnswering, AutoModelForSequenceClassification, AutoTokenizer
 
-from ...models import MeanPooling
+from ...models import PoolingFactory
 from ..tensors import Tensors
 
 
@@ -29,7 +29,7 @@ class HFOnnx(Tensors):
     Exports a Hugging Face Transformer model to ONNX.
     """
 
-    def __call__(self, path, task="default", output=None, quantize=False, opset=12):
+    def __call__(self, path, task="default", output=None, quantize=False, opset=14):
         """
         Exports a Hugging Face Transformer model to ONNX.
 
@@ -38,7 +38,7 @@ class HFOnnx(Tensors):
             task: optional model task or category, determines the model type and outputs, defaults to export hidden state
             output: optional output model path, defaults to return byte array if None
             quantize: if model should be quantized (requires onnx to be installed), defaults to False
-            opset: onnx opset, defaults to 12
+            opset: onnx opset, defaults to 14
 
         Returns:
             path to model output or model as bytes depending on output parameter
@@ -106,14 +106,8 @@ class HFOnnx(Tensors):
 
             output = temp
 
-        # Optimize model - only need CPU provider
-        sess_option = SessionOptions()
-        sess_option.optimized_model_filepath = output
-        sess_option.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_BASIC
-        _ = InferenceSession(output, sess_option, ["CPUExecutionProvider"])
-
-        # Quantize optimized model
-        quantize_dynamic(output, output, optimize_model=False)
+        # Quantize model
+        quantize_dynamic(output, output, extra_options={"MatMulConstBOnly": False})
 
         # Read file back to bytes if temp file was created
         if temp:
@@ -143,7 +137,7 @@ class HFOnnx(Tensors):
 
         config = {
             "default": (OrderedDict({"last_hidden_state": {0: "batch", 1: "sequence"}}), AutoModel.from_pretrained),
-            "pooling": (OrderedDict({"embeddings": {0: "batch", 1: "sequence"}}), lambda x: MeanPoolingOnnx(x, -1)),
+            "pooling": (OrderedDict({"embeddings": {0: "batch", 1: "sequence"}}), lambda x: PoolingOnnx(x, -1)),
             "question-answering": (
                 OrderedDict(
                     {
@@ -162,18 +156,41 @@ class HFOnnx(Tensors):
         return (inputs,) + config[task]
 
 
-class MeanPoolingOnnx(MeanPooling):
+class PoolingOnnx(nn.Module):
     """
-    Extends MeanPooling class to name inputs to model, which is required
-    to export to ONNX.
+    Extends Pooling methods to name inputs to model, which is required to export to ONNX.
     """
+
+    def __init__(self, path, device):
+        """
+        Creates a new PoolingOnnx instance.
+
+        Args:
+            path: path to model, accepts Hugging Face model hub id or local path
+            device: tensor device id
+        """
+
+        super().__init__()
+
+        # Create pooling method based on configuration
+        self.model = PoolingFactory.create({"path": path, "device": device})
 
     # pylint: disable=W0221
     def forward(self, input_ids=None, attention_mask=None, token_type_ids=None):
+        """
+        Runs inputs through pooling model and returns outputs.
+
+        Args:
+            inputs: model inputs
+
+        Returns:
+            model outputs
+        """
+
         # Build list of arguments dynamically since some models take token_type_ids
         # and others don't
         inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
         if token_type_ids is not None:
             inputs["token_type_ids"] = token_type_ids
 
-        return super().forward(**inputs)
+        return self.model.forward(**inputs)

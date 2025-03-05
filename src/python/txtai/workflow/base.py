@@ -20,7 +20,6 @@ from .execute import Execute
 
 # Logging configuration
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 
 class Workflow:
@@ -28,7 +27,7 @@ class Workflow:
     Base class for all workflows.
     """
 
-    def __init__(self, tasks, batch=100, workers=None, name=None):
+    def __init__(self, tasks, batch=100, workers=None, name=None, stream=None):
         """
         Creates a new workflow. Workflows are lists of tasks to execute.
 
@@ -37,31 +36,37 @@ class Workflow:
             batch: how many items to process at a time, defaults to 100
             workers: number of concurrent workers
             name: workflow name
+            stream: workflow stream processor
         """
 
         self.tasks = tasks
         self.batch = batch
         self.workers = workers
         self.name = name
+        self.stream = stream
 
         # Set default number of executor workers to max number of actions in a task
         self.workers = max(len(task.action) for task in self.tasks) if not self.workers else self.workers
 
     def __call__(self, elements):
         """
-        Executes a workflow for input elements.
+        Executes a workflow for input elements. This method returns a generator that yields transformed
+        data elements.
 
         Args:
             elements: iterable data elements
 
         Returns:
-            transformed data elements
+            generator that yields transformed data elements
         """
 
         # Create execute instance for this run
         with Execute(self.workers) as executor:
             # Run task initializers
             self.initialize()
+
+            # Process elements with stream processor, if available
+            elements = self.stream(elements) if self.stream else elements
 
             # Process elements in batches
             for batch in self.chunk(elements):
@@ -161,7 +166,8 @@ class Workflow:
         """
 
         # Run elements through each task
-        for task in self.tasks:
+        for x, task in enumerate(self.tasks):
+            logger.debug("Running Task #%d", x)
             elements = task(elements, executor)
 
         # Yield results processed by all tasks

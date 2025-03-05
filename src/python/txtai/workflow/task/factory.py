@@ -4,6 +4,8 @@ Task factory module
 
 import functools
 
+from ...util import Resolver
+
 
 class TaskFactory:
     """
@@ -28,13 +30,7 @@ class TaskFactory:
             task = ".".join(__name__.split(".")[:-1]) + "." + task.capitalize() + "Task"
 
         # Attempt to load custom task
-        parts = task.split(".")
-        module = ".".join(parts[:-1])
-        m = __import__(module)
-        for comp in parts[1:]:
-            m = getattr(m, comp)
-
-        return m
+        return Resolver()(task)
 
     @staticmethod
     def create(config, task):
@@ -55,9 +51,10 @@ class TaskFactory:
             action = config["action"]
             if action:
                 if isinstance(action, list):
-                    config["action"] = [Partial(a, *args[i]) if args[i] else Partial(a) for i, a in enumerate(action)]
+                    config["action"] = [Partial.create(a, args[i]) for i, a in enumerate(action)]
                 else:
-                    config["action"] = lambda x: action(x, *args)
+                    # Accept keyword or positional arguments
+                    config["action"] = lambda x: action(x, **args) if isinstance(args, dict) else action(x, *args)
 
         # Get Task instance
         return TaskFactory.get(task)(**config)
@@ -67,6 +64,21 @@ class Partial(functools.partial):
     """
     Modifies functools.partial to prepend arguments vs append.
     """
+
+    @staticmethod
+    def create(action, args):
+        """
+        Creates a new Partial function.
+
+        Args:
+            action: action to execute
+            args: arguments
+
+        Returns:
+            Partial
+        """
+
+        return Partial(action, **args) if isinstance(args, dict) else Partial(action, *args) if args else Partial(action)
 
     def __call__(self, *args, **kwargs):
         # Update keyword arguments

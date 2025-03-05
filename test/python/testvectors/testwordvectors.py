@@ -1,15 +1,18 @@
 """
-Vectors module tests
+WordVectors module tests
 """
 
 import os
-import pickle
 import tempfile
 import unittest
 
 from unittest.mock import patch
 
-from txtai.vectors import WordVectors, VectorsFactory
+import numpy as np
+
+from huggingface_hub.errors import HFValidationError
+from txtai.vectors import VectorsFactory
+from txtai.vectors.words import create, transform
 
 
 class TestWordVectors(unittest.TestCase):
@@ -20,33 +23,11 @@ class TestWordVectors(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """
-        Test a WordVectors build.
+        Sets the pretrained model to use
         """
 
-        # Word vectors path
-        path = os.path.join(tempfile.gettempdir(), "vectors")
-
-        # Save model path
-        cls.path = path + ".magnitude"
-
-        # Build word vectors
-        WordVectors.build("README.md", 10, 3, path)
-
-    def testBlocking(self):
-        """
-        Test blocking load of vector model
-        """
-
-        config = {"path": self.path}
-        model = VectorsFactory.create(config, None)
-
-        self.assertFalse(model.initialized)
-
-        config["ids"] = ["0", "1"]
-        config["dimensions"] = 10
-        model = VectorsFactory.create(config, None)
-
-        self.assertTrue(model.initialized)
+        # Test with pretrained glove quantized vectors
+        cls.path = "neuml/glove-6B-quantized"
 
     @patch("os.cpu_count")
     def testIndex(self, cpucount):
@@ -62,16 +43,42 @@ class TestWordVectors(unittest.TestCase):
 
         model = VectorsFactory.create({"path": self.path, "parallel": True}, None)
 
-        ids, dimension, batches, stream = model.index(documents)
+        ids, dimension, batches, stream = model.index(documents, 1)
 
         self.assertEqual(len(ids), 1000)
-        self.assertEqual(dimension, 10)
+        self.assertEqual(dimension, 300)
         self.assertEqual(batches, 1000)
         self.assertIsNotNone(os.path.exists(stream))
 
         # Test shape of serialized embeddings
         with open(stream, "rb") as queue:
-            self.assertEqual(pickle.load(queue).shape, (1, 10))
+            self.assertEqual(np.load(queue).shape, (1, 300))
+
+    @patch("os.cpu_count")
+    def testIndexBatch(self, cpucount):
+        """
+        Test word vectors indexing with batch size set
+        """
+
+        # Mock CPU count
+        cpucount.return_value = 1
+
+        # Generate data
+        documents = [(x, "This is a test", None) for x in range(1000)]
+
+        model = VectorsFactory.create({"path": self.path, "parallel": True}, None)
+
+        ids, dimension, batches, stream = model.index(documents, 512)
+
+        self.assertEqual(len(ids), 1000)
+        self.assertEqual(dimension, 300)
+        self.assertEqual(batches, 2)
+        self.assertIsNotNone(os.path.exists(stream))
+
+        # Test shape of serialized embeddings
+        with open(stream, "rb") as queue:
+            self.assertEqual(np.load(queue).shape, (512, 300))
+            self.assertEqual(np.load(queue).shape, (488, 300))
 
     def testIndexSerial(self):
         """
@@ -83,16 +90,38 @@ class TestWordVectors(unittest.TestCase):
 
         model = VectorsFactory.create({"path": self.path, "parallel": False}, None)
 
-        ids, dimension, batches, stream = model.index(documents)
+        ids, dimension, batches, stream = model.index(documents, 1)
 
         self.assertEqual(len(ids), 1000)
-        self.assertEqual(dimension, 10)
+        self.assertEqual(dimension, 300)
         self.assertEqual(batches, 1000)
         self.assertIsNotNone(os.path.exists(stream))
 
         # Test shape of serialized embeddings
         with open(stream, "rb") as queue:
-            self.assertEqual(pickle.load(queue).shape, (1, 10))
+            self.assertEqual(np.load(queue).shape, (1, 300))
+
+    def testIndexSerialBatch(self):
+        """
+        Test word vector indexing in single process mode with batch size set
+        """
+
+        # Generate data
+        documents = [(x, "This is a test", None) for x in range(1000)]
+
+        model = VectorsFactory.create({"path": self.path, "parallel": False}, None)
+
+        ids, dimension, batches, stream = model.index(documents, 512)
+
+        self.assertEqual(len(ids), 1000)
+        self.assertEqual(dimension, 300)
+        self.assertEqual(batches, 2)
+        self.assertIsNotNone(os.path.exists(stream))
+
+        # Test shape of serialized embeddings
+        with open(stream, "rb") as queue:
+            self.assertEqual(np.load(queue).shape, (512, 300))
+            self.assertEqual(np.load(queue).shape, (488, 300))
 
     def testLookup(self):
         """
@@ -100,7 +129,18 @@ class TestWordVectors(unittest.TestCase):
         """
 
         model = VectorsFactory.create({"path": self.path}, None)
-        self.assertEqual(model.lookup(["txtai", "embeddings", "sentence"]).shape, (3, 10))
+        self.assertEqual(model.lookup(["txtai", "embeddings", "sentence"]).shape, (3, 300))
+
+    def testMultiprocess(self):
+        """
+        Test multiprocess helper methods
+        """
+
+        create({"path": self.path}, None)
+
+        uid, vector = transform((0, "test", None))
+        self.assertEqual(uid, 0)
+        self.assertEqual(vector.shape, (300,))
 
     def testNoExist(self):
         """
@@ -108,7 +148,7 @@ class TestWordVectors(unittest.TestCase):
         """
 
         # Test non-existent path raises an exception
-        with self.assertRaises(IOError):
+        with self.assertRaises((IOError, HFValidationError)):
             VectorsFactory.create({"method": "words", "path": os.path.join(tempfile.gettempdir(), "noexist")}, None)
 
     def testTransform(self):
@@ -117,4 +157,4 @@ class TestWordVectors(unittest.TestCase):
         """
 
         model = VectorsFactory.create({"path": self.path}, None)
-        self.assertEqual(len(model.transform((None, ["txtai"], None))), 10)
+        self.assertEqual(len(model.transform((None, ["txtai"], None))), 300)

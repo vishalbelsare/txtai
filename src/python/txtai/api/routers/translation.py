@@ -7,12 +7,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Body
 
 from .. import application
+from ..route import EncodingAPIRoute
 
-router = APIRouter()
+router = APIRouter(route_class=EncodingAPIRoute)
 
 
 @router.get("/translate")
-def translate(text: str, target: Optional[str] = "en", source: Optional[int] = None):
+def translate(text: str, target: Optional[str] = "en", source: Optional[str] = None):
     """
     Translates text from source language into target language.
 

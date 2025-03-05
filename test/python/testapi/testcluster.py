@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from txtai.api import app, start
+from txtai.api import application
 
 # Configuration for an embeddings cluster
 CLUSTER = """
@@ -73,7 +73,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/batchsearch"):
             response = [[{"id": 4, "score": 0.40}], [{"id": 1, "score": 0.40}]]
         elif self.path.startswith("/delete"):
-            response = [0]
+            if self.server.server_port == 8002:
+                response = [0]
+            else:
+                response = []
         else:
             response = {"result": "ok"}
 
@@ -106,8 +109,10 @@ class TestCluster(unittest.TestCase):
         with open(config, "w", encoding="utf-8") as output:
             output.write(CLUSTER)
 
-        client = TestClient(app)
-        start()
+        # Create new application and set on client
+        application.app = application.create()
+        client = TestClient(application.app)
+        application.start()
 
         return client
 
@@ -160,18 +165,41 @@ class TestCluster(unittest.TestCase):
 
     def testDeleteString(self):
         """
-        Test string id
+        Test cluster delete with string id
         """
 
         self.assertEqual(self.client.post("delete", json=["0"]).json(), [0])
+
+    def testIds(self):
+        """
+        Test id configurations
+        """
+
+        # String ids
+        self.client.post("add", json=[{"id": "0", "text": "test"}])
+        self.assertEqual(self.client.get("index").status_code, 200)
+
+        # Auto ids
+        self.client.post("add", json=[{"text": "test"}])
+        self.assertEqual(self.client.get("index").status_code, 200)
+
+    def testReindex(self):
+        """
+        Test cluster reindex
+        """
+
+        self.assertEqual(self.client.post("reindex", json={"config": {"path": "sentence-transformers/nli-mpnet-base-v2"}}).status_code, 200)
 
     def testSearch(self):
         """
         Test cluster search
         """
 
+        # Encode parameters
+        params = json.dumps({"x": 1})
+
         query = urllib.parse.quote("feel good story")
-        uid = self.client.get(f"search?query={query}&limit=1").json()[0]["id"]
+        uid = self.client.get(f"search?query={query}&limit=1&weights=0.5&index=default&parameters={params}&graph=False").json()[0]["id"]
         self.assertEqual(uid, 4)
 
     def testSearchBatch(self):
@@ -179,7 +207,17 @@ class TestCluster(unittest.TestCase):
         Test cluster batch search
         """
 
-        results = self.client.post("batchsearch", json={"queries": ["feel good story", "climate change"], "limit": 1}).json()
+        results = self.client.post(
+            "batchsearch",
+            json={
+                "queries": ["feel good story", "climate change"],
+                "limit": 1,
+                "weights": 0.5,
+                "index": "default",
+                "parameters": [{"x": 1}, {"x": 2}],
+                "graph": False,
+            },
+        ).json()
 
         uids = [result[0]["id"] for result in results]
         self.assertEqual(uids, [4, 1])

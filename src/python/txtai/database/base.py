@@ -5,8 +5,6 @@ Database module
 import logging
 import types
 
-from inspect import signature
-
 from .encoder import EncoderFactory
 from .sql import SQL, SQLError, Token
 
@@ -16,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 class Database:
     """
-    Base class for database instances. This class encapsulates a document-oriented database
-    used for storing key-value content stored as dicts.
+    Base class for database instances. This class encapsulates a content database used for
+    storing field content as dicts and objects. The database instance works in conjuction
+    with a vector index to execute SQL-driven similarity search.
     """
 
     def __init__(self, config):
@@ -28,18 +27,8 @@ class Database:
             config: database configuration
         """
 
-        # Database configuration
-        self.config = config
-
-        # SQL parser
-        self.sql = SQL(self)
-
-        # Load objects encoder
-        encoder = self.config.get("objects")
-        self.encoder = EncoderFactory.create(encoder) if encoder else None
-
-        # Load custom functions
-        self.functions = self.register(self.config)
+        # Initialize configuration
+        self.configure(config)
 
     def load(self, path):
         """
@@ -72,13 +61,13 @@ class Database:
 
         raise NotImplementedError
 
-    def reindex(self, columns=None):
+    def reindex(self, config):
         """
         Reindexes internal database content and streams results back. This method must renumber indexids
         sequentially as deletes could have caused indexid gaps.
 
         Args:
-            columns: optional list of document columns used to rebuild data
+            config: new configuration
         """
 
         raise NotImplementedError
@@ -95,7 +84,7 @@ class Database:
 
     def close(self):
         """
-        Closes the database.
+        Closes this database.
         """
 
         raise NotImplementedError
@@ -114,14 +103,24 @@ class Database:
 
         raise NotImplementedError
 
-    def search(self, query, similarity=None, limit=None):
+    def count(self):
+        """
+        Retrieves the count of this database instance.
+
+        Returns:
+            total database count
+        """
+
+        raise NotImplementedError
+
+    def search(self, query, similarity=None, limit=None, parameters=None, indexids=False):
         """
         Runs a search against the database. Supports the following methods:
 
-           1. Standard similarity query. This mode retrieves content for the ids in the similarity results
-           2. Similarity query as SQL. This mode will combine similarity results and database results into
-              a single result set. Similarity queries are set via the SIMILAR() function.
-           3. SQL with no similarity query. This mode runs a SQL query and retrieves the results without similarity queries.
+            1. Standard similarity query. This mode retrieves content for the ids in the similarity results
+            2. Similarity query as SQL. This mode will combine similarity results and database results into
+               a single result set. Similarity queries are set via the SIMILAR() function.
+            3. SQL with no similarity query. This mode runs a SQL query and retrieves the results without similarity queries.
 
         Example queries:
             "natural language processing" - standard similarity only query
@@ -134,9 +133,11 @@ class Database:
             query: input query
             similarity: similarity results as [(indexid, score)]
             limit: maximum number of results to return
+            parameters: dict of named parameters to bind to placeholders
 
         Returns:
             query results as a list of dicts
+            list of ([indexid, score]) if indexids is True
         """
 
         # Parse query if necessary
@@ -151,6 +152,7 @@ class Database:
                 token = f"{Token.SIMILAR_TOKEN}{x}"
                 if where and token in where:
                     where = where.replace(token, self.embed(similarity, x))
+
         elif similarity:
             # Not a SQL query, load similarity results, if any
             where = self.embed(similarity, 0)
@@ -159,7 +161,7 @@ class Database:
         query["where"] = where
 
         # Run query
-        return self.query(query, limit)
+        return self.query(query, limit, parameters, indexids)
 
     def parse(self, query):
         """
@@ -200,13 +202,15 @@ class Database:
 
         raise NotImplementedError
 
-    def query(self, query, limit):
+    def query(self, query, limit, parameters, indexids):
         """
         Executes query against database.
 
         Args:
             query: input query
             limit: maximum number of results to return
+            parameters: dict of named parameters to bind to placeholders
+            indexids: results are returned as [(indexid, score)] regardless of select clause parameters if True
 
         Returns:
             query results
@@ -214,7 +218,39 @@ class Database:
 
         raise NotImplementedError
 
-    def register(self, config):
+    def configure(self, config):
+        """
+        Initialize configuration.
+
+        Args:
+            config: configuration
+        """
+
+        # Database configuration
+        self.config = config
+
+        # SQL parser
+        self.sql = SQL(self)
+
+        # Load objects encoder
+        encoder = self.config.get("objects")
+        self.encoder = EncoderFactory.create(encoder) if encoder else None
+
+        # Transform columns
+        columns = config.get("columns", {})
+        self.text = columns.get("text", "text")
+        self.object = columns.get("object", "object")
+
+        # Custom functions and expressions
+        self.functions, self.expressions = None, None
+
+        # Load custom functions
+        self.registerfunctions(self.config)
+
+        # Load custom expressions
+        self.registerexpressions(self.config)
+
+    def registerfunctions(self, config):
         """
         Register custom functions. This method stores the function details for underlying
         database implementations to handle.
@@ -227,27 +263,44 @@ class Database:
         if inputs:
             functions = []
             for fn in inputs:
-                name, argcount = None, None
+                name, argcount = None, -1
 
                 # Optional function configuration
                 if isinstance(fn, dict):
-                    name, argcount, fn = fn.get("name"), fn.get("argcount"), fn["function"]
+                    name, argcount, fn = fn.get("name"), fn.get("argcount", -1), fn["function"]
 
                 # Determine if this is a callable object or a function
                 if not isinstance(fn, types.FunctionType) and hasattr(fn, "__call__"):
                     name = name if name else fn.__class__.__name__.lower()
-                    argcount = argcount if argcount else len(signature(fn.__call__).parameters)
                     fn = fn.__call__
                 else:
                     name = name if name else fn.__name__.lower()
-                    argcount = argcount if argcount else len(signature(fn).parameters)
 
                 # Store function details
                 functions.append((name, argcount, fn))
 
-            return functions
+            # pylint: disable=W0201
+            self.functions = functions
 
-        return None
+    def registerexpressions(self, config):
+        """
+        Register custom expressions. This method parses and resolves expressions for later use in SQL queries.
+
+        Args:
+            config: database configuration
+        """
+
+        inputs = config.get("expressions") if config else None
+        if inputs:
+            expressions = {}
+            for entry in inputs:
+                name = entry.get("name")
+                expression = entry.get("expression")
+                if name and expression:
+                    expressions[name] = self.sql.snippet(expression)
+
+            # pylint: disable=W0201
+            self.expressions = expressions
 
     def execute(self, function, *args):
         """
@@ -263,8 +316,27 @@ class Database:
 
         try:
             # Debug log SQL
-            logger.debug(*args)
+            logger.debug(" ".join(["%s"] * len(args)), *args)
 
             return function(*args)
-        except Exception as ex:
-            raise SQLError(ex) from None
+        except Exception as e:
+            raise SQLError(e) from None
+
+    def setting(self, name, default=None):
+        """
+        Looks up database specific setting.
+
+        Args:
+            name: setting name
+            default: default value when setting not found
+
+        Returns:
+            setting value
+        """
+
+        # Get the database-specific config object
+        database = self.config.get(self.config["content"])
+
+        # Get setting value, set default value if not found
+        setting = database.get(name) if database else None
+        return setting if setting else default

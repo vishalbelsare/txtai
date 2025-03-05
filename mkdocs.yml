@@ -3,7 +3,7 @@
 #
 
 site_name: txtai
-site_description: "txtai: Build AI-powered semantic search applications"
+site_description: "txtai is an all-in-one open-source embeddings database for semantic search, LLM orchestration and language model workflows"
 repo_name: neuml/txtai
 repo_url: https://github.com/neuml/txtai
 copyright: © NeuML LLC, Apache-2.0 License
@@ -37,28 +37,56 @@ plugins:
     - mkdocstrings:
         handlers:
             python:
-                rendering:
+                options:
                     show_root_full_path: false
                     show_root_heading: true
                     show_root_toc_entry: false
+    - redirects:
+        redirect_maps:
+            "pipeline/text/extractor.md": "pipeline/text/rag.md"
+            "pipeline/text/generator.md": "pipeline/text/llm.md"
+            "pipeline/text/sequences.md": "pipeline/text/llm.md"
+
 markdown_extensions:
     - pymdownx.highlight
     - pymdownx.superfences
 nav:
     - Home: index.md
     - Why txtai?: why.md
+    - Use Cases: usecases.md
     - Installation: install.md
-    - Examples: examples.md
+    - Model Guide: models.md
     - Embeddings:
         - embeddings/index.md
-        - Configuration: embeddings/configuration.md
+        - Configuration:
+            - embeddings/configuration/index.md
+            - ANN: embeddings/configuration/ann.md
+            - Cloud: embeddings/configuration/cloud.md
+            - Database: embeddings/configuration/database.md
+            - General: embeddings/configuration/general.md
+            - Graph: embeddings/configuration/graph.md
+            - Scoring: embeddings/configuration/scoring.md
+            - Vectors: embeddings/configuration/vectors.md
+        - Index Format: embeddings/format.md
+        - Index Guide: embeddings/indexing.md
         - Methods: embeddings/methods.md
         - Query Guide: embeddings/query.md
+    - Agent:
+        - agent/index.md
+        - Configuration: agent/configuration.md
+        - Methods: agent/methods.md
     - Pipeline:
         - pipeline/index.md
         - Audio:
+            - Audio Mixer: pipeline/audio/audiomixer.md
+            - Audio Stream: pipeline/audio/audiostream.md
+            - Microphone: pipeline/audio/microphone.md
+            - Text To Audio: pipeline/audio/texttoaudio.md
+            - Text To Speech: pipeline/audio/texttospeech.md
             - Transcription: pipeline/audio/transcription.md
         - Data:
+            - File To HTML: pipeline/data/filetohtml.md
+            - HTML To Markdown: pipeline/data/htmltomd.md
             - Segmentation: pipeline/data/segmentation.md
             - Tabular: pipeline/data/tabular.md
             - Textractor: pipeline/data/textractor.md
@@ -68,9 +96,9 @@ nav:
             - Objects: pipeline/image/objects.md
         - Text:
             - Entity: pipeline/text/entity.md
-            - Extractor: pipeline/text/extractor.md
             - Labels: pipeline/text/labels.md
-            - Sequences: pipeline/text/sequences.md
+            - LLM: pipeline/text/llm.md
+            - RAG: pipeline/text/rag.md
             - Similarity: pipeline/text/similarity.md
             - Summary: pipeline/text/summary.md
             - Translation: pipeline/text/translation.md
@@ -90,12 +118,20 @@ nav:
             - Retrieve: workflow/task/retrieve.md
             - Service: workflow/task/service.md
             - Storage: workflow/task/storage.md
+            - Template: workflow/task/template.md
             - Url: workflow/task/url.md
             - Workflow: workflow/task/workflow.md
     - API:
         - api/index.md
         - Cluster: api/cluster.md
         - Configuration: api/configuration.md
+        - Customization: api/customization.md
         - Methods: api/methods.md
+        - OpenAI: api/openai.md
+        - Security: api/security.md
     - Cloud: cloud.md
+    - Examples: examples.md
+    - FAQ: faq.md
+    - Observability: observability.md
+    - Powered by txtai: poweredby.md
     - Further Reading: further.md
