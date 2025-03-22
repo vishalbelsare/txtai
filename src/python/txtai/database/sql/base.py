@@ -14,7 +14,7 @@ class SQL:
     """
 
     # List of clauses to parse
-    CLAUSES = ["select", "from", "where", "group", "having", "order", "limit"]
+    CLAUSES = ["select", "from", "where", "group", "having", "order", "limit", "offset"]
 
     def __init__(self, database=None, tolist=False):
         """
@@ -59,6 +59,7 @@ class SQL:
                 "having": self.parse(tokens, positions, "having", aliases=aliases),
                 "orderby": self.parse(tokens, positions, "order", offset=2, aliases=aliases),
                 "limit": self.parse(tokens, positions, "limit", aliases=aliases),
+                "offset": self.parse(tokens, positions, "offset", aliases=aliases),
             }
 
             # Add parsed similar queries, if any
@@ -94,11 +95,28 @@ class SQL:
             True if this is a valid SQL query, False otherwise
         """
 
-        # Reduce query to a lower-cased single line stripped of leading/trailing whitespace
-        query = query.lower().strip(";").replace("\n", " ").replace("\t", " ").strip()
+        if isinstance(query, str):
+            # Reduce query to a lower-cased single line stripped of leading/trailing whitespace
+            query = query.lower().strip(";").replace("\n", " ").replace("\t", " ").strip()
 
-        # Detect if this is a valid txtai SQL statement
-        return query.startswith("select ") and (" from txtai " in query or query.endswith(" from txtai"))
+            # Detect if this is a valid txtai SQL statement
+            return query.startswith("select ") and (" from txtai " in query or query.endswith(" from txtai"))
+
+        return False
+
+    def snippet(self, text):
+        """
+        Parses a partial SQL snippet.
+
+        Args:
+            text: SQL snippet
+
+        Returns:
+            parsed snippet
+        """
+
+        tokens, _ = self.tokenize(text)
+        return self.expression(tokens)
 
     def tokenize(self, query):
         """
@@ -126,7 +144,7 @@ class SQL:
         # Get position of clause keywords. For multi-term clauses, validate next token matches as well
         for x, token in enumerate(tokens):
             t = token.lower()
-            if t not in positions and t in SQL.CLAUSES and (t not in ["group", "order"] or (x + 1 < len(tokens) and tokens[x + 1] == "by")):
+            if t not in positions and t in SQL.CLAUSES and (t not in ["group", "order"] or (x + 1 < len(tokens) and tokens[x + 1].lower() == "by")):
                 positions[t] = x
 
         return (tokens, positions)

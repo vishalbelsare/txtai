@@ -12,8 +12,8 @@ class Summary(HFPipeline):
     Summarizes text.
     """
 
-    def __init__(self, path=None, quantize=False, gpu=True, model=None):
-        super().__init__("summarization", path, quantize, gpu, model)
+    def __init__(self, path=None, quantize=False, gpu=True, model=None, **kwargs):
+        super().__init__("summarization", path, quantize, gpu, model, **kwargs)
 
     def __call__(self, text, minlength=None, maxlength=None, workers=0):
         """
@@ -33,7 +33,7 @@ class Summary(HFPipeline):
         """
 
         # Validate text length greater than max length
-        check = maxlength if maxlength else self.pipeline.model.config.max_length
+        check = maxlength if maxlength else self.maxlength()
 
         # Skip text shorter than max length
         texts = text if isinstance(text, list) else [text]

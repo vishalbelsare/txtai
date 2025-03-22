@@ -3,14 +3,20 @@ ANN module tests
 """
 
 import os
+import platform
+import sys
 import tempfile
 import unittest
+
+from unittest.mock import patch
 
 import numpy as np
 
 from txtai.ann import ANNFactory, ANN
+from txtai.serialize import SerializeFactory
 
 
+# pylint: disable=R0904
 class TestANN(unittest.TestCase):
     """
     ANN tests.
@@ -31,6 +37,21 @@ class TestANN(unittest.TestCase):
         # Test with custom settings
         self.runTests("annoy", {"annoy": {"ntrees": 2, "searchk": 1}}, False)
 
+    def testCustomBackend(self):
+        """
+        Test resolving a custom backend
+        """
+
+        self.runTests("txtai.ann.Faiss")
+
+    def testCustomBackendNotFound(self):
+        """
+        Test resolving an unresolvable backend
+        """
+
+        with self.assertRaises(ImportError):
+            ANNFactory.create({"backend": "notfound.ann"})
+
     def testFaiss(self):
         """
         Test Faiss backend
@@ -44,7 +65,39 @@ class TestANN(unittest.TestCase):
         """
 
         # Test with custom settings
-        self.runTests("faiss", {"faiss": {"nprobe": 2, "components": "PCA16,IDMap,SQ8"}}, False)
+        self.runTests("faiss", {"faiss": {"nprobe": 2, "components": "PCA16,IDMap,SQ8", "sample": 1.0}}, False)
+        self.runTests("faiss", {"faiss": {"components": "IVF,SQ8"}}, False)
+
+    @patch("platform.system")
+    def testFaissMacOS(self, system):
+        """
+        Test Faiss backend with macOS
+        """
+
+        # Run test
+        system.return_value = "Darwin"
+
+        # pylint: disable=C0415, W0611
+        # Force reload of class
+        name = "txtai.ann.faiss"
+        module = sys.modules[name]
+        del sys.modules[name]
+        import txtai.ann.faiss
+
+        # Run tests
+        self.runTests("faiss")
+
+        # Restore original module
+        sys.modules[name] = module
+
+    @unittest.skipIf(os.name == "nt", "mmap not supported on Windows")
+    def testFaissMmap(self):
+        """
+        Test Faiss backend with mmap enabled
+        """
+
+        # Test to with mmap enabled
+        self.runTests("faiss", {"faiss": {"mmap": True}}, False)
 
     def testHnsw(self):
         """
@@ -63,7 +116,7 @@ class TestANN(unittest.TestCase):
 
     def testNotImplemented(self):
         """
-        Tests exceptions for non-implemented methods
+        Test exceptions for non-implemented methods
         """
 
         ann = ANN({})
@@ -75,6 +128,130 @@ class TestANN(unittest.TestCase):
         self.assertRaises(NotImplementedError, ann.search, None, None)
         self.assertRaises(NotImplementedError, ann.count)
         self.assertRaises(NotImplementedError, ann.save, None)
+
+    def testNumPy(self):
+        """
+        Test NumPy backend
+        """
+
+        self.runTests("numpy")
+
+    @patch.dict(os.environ, {"ALLOW_PICKLE": "True"})
+    def testNumPyLegacy(self):
+        """
+        Test NumPy backend with legacy pickled data
+        """
+
+        serializer = SerializeFactory.create("pickle", allowpickle=True)
+
+        # Create output directory
+        output = os.path.join(tempfile.gettempdir(), "ann.npy")
+        path = os.path.join(output, "embeddings")
+        os.makedirs(output, exist_ok=True)
+
+        # Generate data and save as pickle
+        data = np.random.rand(100, 240).astype(np.float32)
+        serializer.save(data, path)
+
+        ann = ANNFactory.create({"backend": "numpy"})
+        ann.load(path)
+
+        # Validate count
+        self.assertEqual(ann.count(), 100)
+
+    @patch("sqlalchemy.orm.Query.limit")
+    def testPGVector(self, query):
+        """
+        Test PGVector backend
+        """
+
+        # Generate test record
+        data = np.random.rand(1, 240).astype(np.float32)
+
+        # Mock database query
+        query.return_value = [(x, -1.0) for x in range(data.shape[0])]
+
+        configs = [
+            ("full", {"dimensions": 240}, {}, data),
+            ("half", {"dimensions": 240}, {"precision": "half"}, data),
+            ("binary", {"quantize": 1, "dimensions": 240 * 8}, {}, data.astype(np.uint8)),
+        ]
+
+        # Create ANN
+        for name, config, pgvector, data in configs:
+            path = os.path.join(tempfile.gettempdir(), f"pgvector.{name}.sqlite")
+            ann = ANNFactory.create(
+                {**{"backend": "pgvector", "pgvector": {**{"url": f"sqlite:///{path}", "schema": "txtai"}, **pgvector}}, **config}
+            )
+
+            # Test indexing
+            ann.index(data)
+            ann.append(data)
+
+            # Validate search results
+            self.assertEqual(ann.search(data, 1), [[(0, 1.0)]])
+
+            # Validate save/load/delete
+            ann.save(None)
+            ann.load(None)
+
+            # Validate count
+            self.assertEqual(ann.count(), 2)
+
+            # Test delete
+            ann.delete([0])
+            self.assertEqual(ann.count(), 1)
+
+            # Close ANN
+            ann.close()
+
+    @unittest.skipIf(platform.system() == "Darwin", "SQLite extensions not supported on macOS")
+    def testSQLite(self):
+        """
+        Test SQLite backend
+        """
+
+        self.runTests("sqlite")
+
+    @unittest.skipIf(platform.system() == "Darwin", "SQLite extensions not supported on macOS")
+    def testSQLiteCustom(self):
+        """
+        Test SQLite backend with custom settings
+        """
+
+        # Test with custom settings
+        self.runTests("sqlite", {"sqlite": {"quantize": 1}})
+        self.runTests("sqlite", {"sqlite": {"quantize": 8}})
+
+        # Test saving to a new path
+        model = self.backend("sqlite")
+        expected = model.count() - 1
+
+        # Test save variations
+        index = os.path.join(tempfile.gettempdir(), "ann.sqlite")
+        new = os.path.join(tempfile.gettempdir(), "ann.sqlite.new")
+
+        # Save new
+        model.save(index)
+
+        # Save to same path
+        model.save(index)
+
+        # Delete id
+        model.delete([0])
+
+        # Save to another path
+        model.load(index)
+        model.save(new)
+
+        self.assertEqual(model.count(), expected)
+
+    def testTorch(self):
+        """
+        Test Torch backend
+        """
+
+        self.runTests("torch")
 
     def runTests(self, name, params=None, update=True):
         """
@@ -110,7 +287,7 @@ class TestANN(unittest.TestCase):
         """
 
         # Generate test data
-        data = np.random.rand(length, 300).astype(np.float32)
+        data = np.random.rand(length, 240).astype(np.float32)
         self.normalize(data)
 
         config = {"backend": name, "dimensions": data.shape[1]}
@@ -139,7 +316,7 @@ class TestANN(unittest.TestCase):
         model = self.backend(name, params)
 
         # Generate test data
-        data = np.random.rand(length, 300).astype(np.float32)
+        data = np.random.rand(length, 240).astype(np.float32)
         self.normalize(data)
 
         model.append(data)
@@ -182,7 +359,11 @@ class TestANN(unittest.TestCase):
         # Generate temp file path
         index = os.path.join(tempfile.gettempdir(), "ann")
 
+        # Save and close index
         model.save(index)
+        model.close()
+
+        # Reload index
         model.load(index)
 
         return model
@@ -203,7 +384,7 @@ class TestANN(unittest.TestCase):
         model = self.backend(name, params)
 
         # Generate query vector
-        query = np.random.rand(300).astype(np.float32)
+        query = np.random.rand(240).astype(np.float32)
         self.normalize(query)
 
         # Ensure top result has similarity > 0

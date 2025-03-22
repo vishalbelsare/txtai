@@ -20,6 +20,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from .registry import Registry
 
+
 # pylint: disable=W0223
 class OnnxModel(PreTrainedModel):
     """
@@ -46,6 +47,17 @@ class OnnxModel(PreTrainedModel):
 
         # Add references for this class to supported AutoModel classes
         Registry.register(self)
+
+    @property
+    def device(self):
+        """
+        Returns model device id.
+
+        Returns:
+            model device id
+        """
+
+        return -1
 
     def providers(self):
         """

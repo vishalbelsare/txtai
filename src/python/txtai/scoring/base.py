@@ -2,42 +2,50 @@
 Scoring module
 """
 
-import math
-import pickle
-
-from collections import Counter
-
-from ..pipeline import Tokenizer
-
 
 class Scoring:
     """
-    Base scoring object. Default method scores documents using TF-IDF.
+    Base scoring.
     """
 
-    def __init__(self):
+    def __init__(self, config=None):
         """
-        Initializes backing statistic objects.
+        Creates a new Scoring instance.
+
+        Args:
+            config: input configuration
         """
 
-        # Document stats
-        self.total = 0
-        self.tokens = 0
-        self.avgdl = 0
+        # Scoring configuration
+        self.config = config if config is not None else {}
 
-        # Word frequency
-        self.docfreq = Counter()
-        self.wordfreq = Counter()
-        self.avgfreq = 0
+        # Transform columns
+        columns = self.config.get("columns", {})
+        self.text = columns.get("text", "text")
+        self.object = columns.get("object", "object")
 
-        # IDF index
-        self.idf = {}
-        self.avgidf = 0
+    def insert(self, documents, index=None):
+        """
+        Inserts documents into the scoring index.
 
-        # Tag boosting
-        self.tags = Counter()
+        Args:
+            documents: list of (id, dict|text|tokens, tags)
+            index: indexid offset
+        """
 
-    def index(self, documents):
+        raise NotImplementedError
+
+    def delete(self, ids):
+        """
+        Deletes documents from scoring index.
+
+        Args:
+            ids: list of ids to delete
+        """
+
+        raise NotImplementedError
+
+    def index(self, documents=None):
         """
         Indexes a collection of documents using a scoring method.
 
@@ -45,47 +53,23 @@ class Scoring:
             documents: list of (id, dict|text|tokens, tags)
         """
 
-        # Calculate word frequency, total tokens and total documents
-        for _, tokens, tags in documents:
-            # Convert to tokens if necessary
-            if isinstance(tokens, str):
-                tokens = Tokenizer.tokenize(tokens)
+        # Insert documents
+        if documents:
+            self.insert(documents)
 
-            # Total number of times token appears, count all tokens
-            self.wordfreq.update(tokens)
+    def upsert(self, documents=None):
+        """
+        Convience method for API clarity. Calls index method.
 
-            # Total number of documents a token is in, count unique tokens
-            self.docfreq.update(set(tokens))
+        Args:
+            documents: list of (id, dict|text|tokens, tags)
+        """
 
-            # Get list of unique tags
-            if tags:
-                self.tags.update(tags.split())
-
-            # Total document count
-            self.total += 1
-
-        # Calculate total token frequency
-        self.tokens = sum(self.wordfreq.values())
-
-        # Calculate average frequency per token
-        self.avgfreq = self.tokens / len(self.wordfreq.values())
-
-        # Calculate average document length in tokens
-        self.avgdl = self.tokens / self.total
-
-        # Compute IDF scores
-        for word, freq in self.docfreq.items():
-            self.idf[word] = self.computeidf(freq)
-
-        # Average IDF score per token
-        self.avgidf = sum(self.idf.values()) / len(self.idf)
-
-        # Filter for tags that appear in at least 1% of the documents
-        self.tags = {tag: number for tag, number in self.tags.items() if number >= self.total * 0.005}
+        self.index(documents)
 
     def weights(self, tokens):
         """
-        Builds weight vector for each token in the input token.
+        Builds a weights vector for each token in input tokens.
 
         Args:
             tokens: input tokens
@@ -94,78 +78,87 @@ class Scoring:
             list of weights for each token
         """
 
-        # Weights array
-        weights = []
+        raise NotImplementedError
 
-        # Document length
-        length = len(tokens)
+    def search(self, query, limit=3):
+        """
+        Search index for documents matching query.
 
-        for token in tokens:
-            # Lookup frequency and idf score - default to averages if not in repository
-            freq = self.wordfreq[token] if token in self.wordfreq else self.avgfreq
-            idf = self.idf[token] if token in self.idf else self.avgidf
+        Args:
+            query: input query
+            limit: maximum results
 
-            # Calculate score for each token, use as weight
-            weights.append(self.score(freq, idf, length))
+        Returns:
+            list of (id, score) or (data, score) if content is enabled
+        """
 
-        # Boost weights of tag tokens to match the largest weight in the list
-        if self.tags:
-            tags = {token: self.tags[token] for token in tokens if token in self.tags}
-            if tags:
-                maxWeight = max(weights)
-                maxTag = max(tags.values())
+        raise NotImplementedError
 
-                weights = [max(maxWeight * (tags[tokens[x]] / maxTag), weight) if tokens[x] in tags else weight for x, weight in enumerate(weights)]
+    def batchsearch(self, queries, limit=3, threads=True):
+        """
+        Search index for documents matching queries.
 
-        return weights
+        Args:
+            queries: queries to run
+            limit: maximum results
+            threads: run as threaded search if True and supported
+        """
+
+        raise NotImplementedError
+
+    def count(self):
+        """
+        Returns the total number of documents indexed.
+
+        Returns:
+            total number of documents indexed
+        """
+
+        raise NotImplementedError
 
     def load(self, path):
         """
         Loads a saved Scoring object from path.
 
         Args:
-            path: directory path to load model
+            path: directory path to load scoring index
         """
 
-        with open(path, "rb") as handle:
-            self.__dict__.update(pickle.load(handle))
+        raise NotImplementedError
 
     def save(self, path):
         """
         Saves a Scoring object to path.
 
         Args:
-            path: directory path to save model
+            path: directory path to save scoring index
         """
 
-        with open(path, "wb") as handle:
-            pickle.dump(self.__dict__, handle, protocol=4)
+        raise NotImplementedError
 
-    def computeidf(self, freq):
+    def close(self):
         """
-        Computes an idf score for word frequency.
+        Closes this Scoring object.
+        """
 
-        Args:
-            freq: word frequency
+        raise NotImplementedError
+
+    def hasterms(self):
+        """
+        Check if this scoring instance has an associated terms index.
 
         Returns:
-            idf score
+            True if this scoring instance has an associated terms index.
         """
 
-        return math.log(self.total / (1 + freq))
+        raise NotImplementedError
 
-    # pylint: disable=W0613
-    def score(self, freq, idf, length):
+    def isnormalized(self):
         """
-        Calculates a score for each token.
-
-        Args:
-            freq: token frequency
-            idf: token idf score
-            length: total number of tokens in source document
+        Check if this scoring instance returns normalized scores.
 
         Returns:
-            token score
+            True if normalize is enabled, False otherwise
         """
 
-        return idf
+        raise NotImplementedError

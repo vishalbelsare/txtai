@@ -2,7 +2,10 @@
 Encoder factory module
 """
 
+from ...util import Resolver
+
 from .base import Encoder
+from .serialize import SerializeEncoder
 
 
 class EncoderFactory:
@@ -27,13 +30,7 @@ class EncoderFactory:
             # Get parent package
             encoder = ".".join(__name__.split(".")[:-1]) + "." + encoder.capitalize() + "Encoder"
 
-        parts = encoder.split(".")
-        module = ".".join(parts[:-1])
-        m = __import__(module)
-        for comp in parts[1:]:
-            m = getattr(m, comp)
-
-        return m
+        return Resolver()(encoder)
 
     @staticmethod
     def create(encoder):
@@ -50,6 +47,10 @@ class EncoderFactory:
         # Return default encoder
         if encoder is True:
             return Encoder()
+
+        # Supported serialization methods
+        if encoder in ["messagepack", "pickle"]:
+            return SerializeEncoder(encoder)
 
         # Get Encoder instance
         return EncoderFactory.get(encoder)()

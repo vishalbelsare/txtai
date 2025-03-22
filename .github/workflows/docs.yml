@@ -7,12 +7,12 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-python@v2
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
-          python-version: 3.7
+          python-version: 3.9
       - run: |
           pip install -U pip wheel
-          pip install mkdocs-material mkdocstrings .[all]
+          pip install .[all,dev]
       - run: mkdocs gh-deploy --force
  

@@ -1,11 +1,16 @@
 """
-Version string
+Base imports
 """
 
 import logging
 
-# Set default logging format
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(funcName)s: %(message)s")
+# Top-level imports
+from .agent import Agent
+from .app import Application
+from .embeddings import Embeddings
+from .pipeline import LLM, RAG
+from .workflow import Workflow
 
-# Current version tag
-__version__ = "4.6.0"
+# Configure logging per standard Python library recommendations
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())

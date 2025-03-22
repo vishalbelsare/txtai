@@ -16,7 +16,19 @@ import torch
 from txtai.api import API
 from txtai.embeddings import Documents, Embeddings
 from txtai.pipeline import Nop, Segmentation, Summary, Translation, Textractor
-from txtai.workflow import Workflow, Task, ConsoleTask, ExportTask, FileTask, ImageTask, RetrieveTask, StorageTask, WorkflowTask
+from txtai.workflow import (
+    Workflow,
+    Task,
+    ConsoleTask,
+    ExportTask,
+    FileTask,
+    ImageTask,
+    RagTask,
+    RetrieveTask,
+    StorageTask,
+    TemplateTask,
+    WorkflowTask,
+)
 
 # pylint: disable = C0411
 from utils import Utils
@@ -63,7 +75,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testBaseWorkflow(self):
         """
-        Tests a basic workflow
+        Test a basic workflow
         """
 
         translate = Translation()
@@ -77,7 +89,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testChainWorkflow(self):
         """
-        Tests a chain of workflows
+        Test a chain of workflows
         """
 
         workflow1 = Workflow([Task(lambda x: [y * 2 for y in x])])
@@ -88,7 +100,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testComplexWorkflow(self):
         """
-        Tests a complex workflow
+        Test a complex workflow
         """
 
         textractor = Textractor(paragraphs=True, minlength=150, join=True)
@@ -129,7 +141,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testConcurrentWorkflow(self):
         """
-        Tests running concurrent task actions
+        Test running concurrent task actions
         """
 
         nop = Nop()
@@ -148,7 +160,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testConsoleWorkflow(self):
         """
-        Tests a console task
+        Test a console task
         """
 
         # Excel export
@@ -162,7 +174,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testExportWorkflow(self):
         """
-        Tests an export task
+        Test an export task
         """
 
         # Excel export
@@ -188,7 +200,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testExtractWorkflow(self):
         """
-        Tests column extraction tasks
+        Test column extraction tasks
         """
 
         workflow = Workflow([Task(lambda x: x, unpack=False, column=0)], batch=1)
@@ -204,7 +216,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testImageWorkflow(self):
         """
-        Tests an image task
+        Test an image task
         """
 
         workflow = Workflow([ImageTask()])
@@ -215,7 +227,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testInvalidWorkflow(self):
         """
-        Tests task with invalid parameters
+        Test task with invalid parameters
         """
 
         with self.assertRaises(TypeError):
@@ -223,7 +235,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testMergeWorkflow(self):
         """
-        Tests merge tasks
+        Test merge tasks
         """
 
         task = Task([lambda x: [pow(y, 2) for y in x], lambda x: [pow(y, 3) for y in x]], merge="hstack")
@@ -280,7 +292,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testNumpyWorkflow(self):
         """
-        Tests a numpy workflow
+        Test a numpy workflow
         """
 
         task = Task([lambda x: np.power(x, 2), lambda x: np.power(x, 3)], merge="hstack")
@@ -302,7 +314,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testRetrieveWorkflow(self):
         """
-        Tests a retrieve task
+        Test a retrieve task
         """
 
         # Test retrieve with generated temporary directory
@@ -315,9 +327,14 @@ class TestWorkflow(unittest.TestCase):
         results = list(workflow(["file://" + Utils.PATH + "/books.jpg"]))
         self.assertTrue(results[0].endswith("books.jpg"))
 
+        # Test with directory structures
+        workflow = Workflow([RetrieveTask(flatten=False)])
+        results = list(workflow(["file://" + Utils.PATH + "/books.jpg"]))
+        self.assertTrue(results[0].endswith("books.jpg") and "txtai" in results[0])
+
     def testScheduleWorkflow(self):
         """
-        Tests workflow schedules
+        Test workflow schedules
         """
 
         # Test workflow schedule with Python
@@ -350,7 +367,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testScheduleErrorWorkflow(self):
         """
-        Tests workflow schedules with errors
+        Test workflow schedules with errors
         """
 
         def action(elements):
@@ -365,18 +382,82 @@ class TestWorkflow(unittest.TestCase):
 
     def testStorageWorkflow(self):
         """
-        Tests a storage task
+        Test a storage task
         """
 
         workflow = Workflow([StorageTask()])
 
         results = list(workflow(["local://" + Utils.PATH, "test string"]))
 
-        self.assertEqual(len(results), 19)
+        self.assertEqual(len(results), 22)
+
+    def testTemplateInput(self):
+        """
+        Test template task input
+        """
+
+        workflow = Workflow([TemplateTask(template="This is a {text}")])
+
+        # Test with string inputs
+        results = list(workflow(["prompt"]))
+        self.assertEqual(results[0], "This is a prompt")
+
+        # Test with dict inputs
+        results = list(workflow([{"text": "prompt"}]))
+        self.assertEqual(results[0], "This is a prompt")
+
+        # Test with tuple inputs
+        workflow = Workflow([TemplateTask(template="This is a {arg0}", unpack=False)])
+        results = list(workflow([("prompt",)]))
+        self.assertEqual(results[0], "This is a prompt")
+
+        # Test invalid inputs
+        with self.assertRaises(KeyError):
+            workflow = Workflow([TemplateTask(template="No variables")])
+            results = list(workflow([{"unused": "prompt"}]))
+
+        # Test no template
+        workflow = Workflow([TemplateTask()])
+        results = list(workflow(["prompt"]))
+        self.assertEqual(results[0], "prompt")
+
+    def testTemplateRules(self):
+        """
+        Test template task rules
+        """
+
+        # Test rule applied
+        workflow = Workflow([TemplateTask(template="This is a {text}", rules={"text": "Test skip"})])
+        results = list(workflow([{"text": "Test skip"}]))
+        self.assertEqual(results[0], "Test skip")
+
+        # Test rule not applied
+        results = list(workflow([{"text": "prompt"}]))
+        self.assertEqual(results[0], "This is a prompt")
+
+    def testTemplateRag(self):
+        """
+        Test rag template task
+        """
+
+        # Test outputs
+        workflow = Workflow([RagTask(template="This is a {text}")])
+        results = list(workflow(["prompt"]))
+        self.assertEqual(results[0], {"query": "prompt", "question": "This is a prompt"})
+
+        # Test partial outputs
+        workflow = Workflow([RagTask(template="This is a {text}")])
+        results = list(workflow([{"query": "query", "question": "prompt"}]))
+        self.assertEqual(results[0], {"query": "query", "question": "This is a prompt"})
+
+        # Test additional template parameters
+        workflow = Workflow([RagTask(template="This is a {text} with another {param}")])
+        results = list(workflow([{"query": "query", "question": "prompt", "param": "value"}]))
+        self.assertEqual(results[0], {"query": "query", "question": "This is a prompt with another value", "param": "value"})
 
     def testTensorTransformWorkflow(self):
         """
-        Tests a tensor workflow with list transformations
+        Test a tensor workflow with list transformations
         """
 
         # Test one-one list transformation
@@ -393,7 +474,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testTorchWorkflow(self):
         """
-        Tests a torch workflow
+        Test a torch workflow
         """
 
         # pylint: disable=E1101,E1102
@@ -416,7 +497,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testYamlFunctionWorkflow(self):
         """
-        Tests YAML workflow with a function action
+        Test YAML workflow with a function action
         """
 
         # Create function and add to module
@@ -437,7 +518,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testYamlIndexWorkflow(self):
         """
-        Tests reading a YAML index workflow in Python.
+        Test reading a YAML index workflow in Python.
         """
 
         app = API(self.config)
@@ -477,6 +558,30 @@ class TestWorkflow(unittest.TestCase):
             "And another sentence to split.",
         )
 
+    def testYamlWorkflowTask(self):
+        """
+        Test YAML workflow with a workflow task
+        """
+
+        # Create function and add to module
+        def action(elements):
+            return [x * 2 for x in elements]
+
+        sys.modules[__name__].action = action
+
+        workflow = """
+        workflow:
+            run:
+                tasks:
+                    - testworkflow.action
+            flow:
+                tasks:
+                    - run
+        """
+
+        app = API(workflow)
+        self.assertEqual(list(app.workflow("flow", [1, 2])), [2, 4])
+
     def testYamlTransformWorkflow(self):
         """
         Test reading a YAML transform workflow in Python.
@@ -488,7 +593,7 @@ class TestWorkflow(unittest.TestCase):
 
     def testYamlError(self):
         """
-        Tests reading a YAML workflow with errors.
+        Test reading a YAML workflow with errors.
         """
 
         # Read from string

@@ -4,16 +4,16 @@ Translation module
 
 # Conditional import
 try:
-    import fasttext
+    from staticvectors import StaticVectors
 
-    FASTTEXT = True
+    STATICVECTORS = True
 except ImportError:
-    FASTTEXT = False
+    STATICVECTORS = False
 
 from huggingface_hub.hf_api import HfApi
-from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer, MarianMTModel, MarianTokenizer
-from transformers.file_utils import cached_path
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+from ...models import Models
 from ..hfmodel import HFModel
 
 
@@ -23,9 +23,9 @@ class Translation(HFModel):
     """
 
     # Default language detection model
-    DEFAULT_LANG_DETECT = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz"
+    DEFAULT_LANG_DETECT = "neuml/language-id-quantized"
 
-    def __init__(self, path="facebook/m2m100_418M", quantize=False, gpu=True, batch=64, langdetect=DEFAULT_LANG_DETECT):
+    def __init__(self, path=None, quantize=False, gpu=True, batch=64, langdetect=None, findmodels=True):
         """
         Constructs a new language translation pipeline.
 
@@ -35,21 +35,24 @@ class Translation(HFModel):
             quantize: if model should be quantized, defaults to False
             gpu: True/False if GPU should be enabled, also supports a GPU device id
             batch: batch size used to incrementally process content
-            langdetect: path to language detection model, uses a default path if not provided
+            langdetect: set a custom language detection function, method must take a list of strings and return
+                        language codes for each, uses default language detector if not provided
+            findmodels: True/False if the Hugging Face Hub will be searched for source-target translation models
         """
 
         # Call parent constructor
-        super().__init__(path, quantize, gpu, batch)
+        super().__init__(path if path else "facebook/m2m100_418M", quantize, gpu, batch)
 
         # Language detection
         self.detector = None
         self.langdetect = langdetect
+        self.findmodels = findmodels
 
         # Language models
         self.models = {}
-        self.ids = self.available()
+        self.ids = self.modelids()
 
-    def __call__(self, texts, target="en", source=None):
+    def __call__(self, texts, target="en", source=None, showmodels=False):
         """
         Translates text from source language into target language.
 
@@ -71,36 +74,45 @@ class Translation(HFModel):
         languages = self.detect(values) if not source else [source] * len(values)
         unique = set(languages)
 
-        # Build list of (index, language, text)
-        values = [(x, lang, values[x]) for x, lang in enumerate(languages)]
+        # Build a dict from language to list of (index, text)
+        langdict = {}
+        for x, lang in enumerate(languages):
+            if lang not in langdict:
+                langdict[lang] = []
+            langdict[lang].append((x, values[x]))
 
         results = {}
         for language in unique:
-            # Get all text values for language
-            inputs = [(x, text) for x, lang, text in values if lang == language]
+            # Get all indices and text values for a language
+            inputs = langdict[language]
 
             # Translate text in batches
             outputs = []
             for chunk in self.batch([text for _, text in inputs], self.batchsize):
-                outputs.extend(self.translate(chunk, language, target))
+                outputs.extend(self.translate(chunk, language, target, showmodels))
 
             # Store output value
             for y, (x, _) in enumerate(inputs):
-                results[x] = outputs[y]
+                if showmodels:
+                    model, op = outputs[y]
+                    results[x] = (op.strip(), language, model)
+                else:
+                    results[x] = outputs[y].strip()
 
         # Return results in same order as input
         results = [results[x] for x in sorted(results)]
         return results[0] if isinstance(texts, str) else results
 
-    def available(self):
+    def modelids(self):
         """
         Runs a query to get a list of available language models from the Hugging Face API.
 
         Returns:
-            list of available language name ids
+            list of source-target language model ids
         """
 
-        return set(x.modelId for x in HfApi().list_models() if x.modelId.startswith("Helsinki-NLP"))
+        ids = [x.id for x in HfApi().list_models(author="Helsinki-NLP")] if self.findmodels else []
+        return set(ids)
 
     def detect(self, texts):
         """
@@ -113,23 +125,41 @@ class Translation(HFModel):
             list of languages
         """
 
-        if not FASTTEXT:
-            raise ImportError('Language detection is not available - install "pipeline" extra to enable')
+        # Default detector
+        if not self.langdetect or isinstance(self.langdetect, str):
+            return self.defaultdetect(texts)
+
+        # Call external language detector
+        return self.langdetect(texts)
+
+    def defaultdetect(self, texts):
+        """
+        Default language detection model.
+
+        Args:
+            texts: list of text
+
+        Returns:
+            list of languages
+        """
 
         if not self.detector:
-            # Suppress unnecessary warning
-            fasttext.FastText.eprint = lambda x: None
+            if not STATICVECTORS:
+                raise ImportError('Language detection is not available - install "pipeline" extra to enable')
+
+            # Get model path
+            path = self.langdetect if self.langdetect else Translation.DEFAULT_LANG_DETECT
 
             # Load language detection model
-            path = cached_path(self.langdetect)
-            self.detector = fasttext.load_model(path)
+            self.detector = StaticVectors(path)
 
         # Transform texts to format expected by language detection model
         texts = [x.lower().replace("\n", " ").replace("\r\n", " ") for x in texts]
 
-        return [x[0].split("__")[-1] for x in self.detector.predict(texts)[0]]
+        # Detect languages
+        return [x[0][0] for x in self.detector.predict(texts)]
 
-    def translate(self, texts, source, target):
+    def translate(self, texts, source, target, showmodels=False):
         """
         Translates text from source to target language.
 
@@ -147,23 +177,24 @@ class Translation(HFModel):
             return texts
 
         # Load model and tokenizer
-        model, tokenizer = self.lookup(source, target)
+        path, model, tokenizer = self.lookup(source, target)
 
         model.to(self.device)
         indices = None
+        maxlength = Models.maxlength(model, tokenizer)
 
         with self.context():
-            if isinstance(model, M2M100ForConditionalGeneration):
+            if hasattr(tokenizer, "lang_code_to_id"):
                 source = self.langid(tokenizer.lang_code_to_id, source)
                 target = self.langid(tokenizer.lang_code_to_id, target)
 
                 tokenizer.src_lang = source
                 tokens, indices = self.tokenize(tokenizer, texts)
 
-                translated = model.generate(**tokens, forced_bos_token_id=tokenizer.lang_code_to_id[target])
+                translated = model.generate(**tokens, forced_bos_token_id=tokenizer.lang_code_to_id[target], max_length=maxlength)
             else:
                 tokens, indices = self.tokenize(tokenizer, texts)
-                translated = model.generate(**tokens)
+                translated = model.generate(**tokens, max_length=maxlength)
 
         # Decode translations
         translated = tokenizer.batch_decode(translated, skip_special_tokens=True)
@@ -171,10 +202,11 @@ class Translation(HFModel):
         # Combine translations - handle splits on large text from tokenizer
         results, last = [], -1
         for x, i in enumerate(indices):
+            v = (path, translated[x]) if showmodels else translated[x]
             if i == last:
-                results[-1] += translated[x]
+                results[-1] += v
             else:
-                results.append(translated[x])
+                results.append(v)
 
             last = i
 
@@ -197,7 +229,7 @@ class Translation(HFModel):
         if path not in self.models:
             self.models[path] = self.load(path)
 
-        return self.models[path]
+        return (path,) + self.models[path]
 
     def modelpath(self, source, target):
         """
@@ -218,7 +250,7 @@ class Translation(HFModel):
             return path
 
         # Use multi-language - english model
-        if target == "en":
+        if self.findmodels and target == "en":
             return template % ("mul", target)
 
         # Default model if no suitable model found
@@ -235,12 +267,8 @@ class Translation(HFModel):
             (model, tokenizer)
         """
 
-        if path.startswith("Helsinki-NLP"):
-            model = MarianMTModel.from_pretrained(path)
-            tokenizer = MarianTokenizer.from_pretrained(path)
-        else:
-            model = M2M100ForConditionalGeneration.from_pretrained(path)
-            tokenizer = M2M100Tokenizer.from_pretrained(path)
+        model = AutoModelForSeq2SeqLM.from_pretrained(path)
+        tokenizer = AutoTokenizer.from_pretrained(path)
 
         # Apply model initialization routines
         model = self.prepare(model)

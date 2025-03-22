@@ -2,30 +2,36 @@
 Word Vectors module
 """
 
+import json
+import logging
 import os
-import pickle
 import tempfile
 
-from errno import ENOENT
 from multiprocessing import Pool
 
 import numpy as np
 
-# Conditionally import Word Vector libraries as they aren't installed by default
-try:
-    import fasttext
-    from pymagnitude import converter, Magnitude
+from huggingface_hub.errors import HFValidationError
+from transformers.utils import cached_file
 
-    WORDS = True
+# Conditional import
+try:
+    from staticvectors import Database, StaticVectors
+
+    STATICVECTORS = True
 except ImportError:
-    WORDS = False
+    STATICVECTORS = False
+
+from ..pipeline import Tokenizer
 
 from .base import Vectors
-from ..pipeline import Tokenizer
+
+# Logging configuration
+logger = logging.getLogger(__name__)
 
 # Multiprocessing helper methods
 # pylint: disable=W0603
-VECTORS = None
+PARAMETERS, VECTORS = None, None
 
 
 def create(config, scoring):
@@ -37,10 +43,11 @@ def create(config, scoring):
         scoring: scoring instance
     """
 
+    global PARAMETERS
     global VECTORS
 
-    # Create a global embedding object using configuration and saved
-    VECTORS = WordVectors(config, scoring)
+    # Store model parameters for lazy loading
+    PARAMETERS, VECTORS = (config, scoring, None), None
 
 
 def transform(document):
@@ -54,82 +61,48 @@ def transform(document):
         (id, embedding)
     """
 
+    # Lazy load vectors model
+    global VECTORS
+    if not VECTORS:
+        VECTORS = WordVectors(*PARAMETERS)
+
     return (document[0], VECTORS.transform(document))
 
 
 class WordVectors(Vectors):
     """
-    Builds sentence embeddings/vectors using weighted word embeddings.
+    Builds vectors using weighted word embeddings.
     """
 
-    def load(self, path):
-        # Ensure that vector path exists
-        if not path or not os.path.isfile(path):
-            raise IOError(ENOENT, "Vector model file not found", path)
-
-        # Load magnitude model. If this is a training run (uninitialized config), block until vectors are fully loaded
-        return Magnitude(path, case_insensitive=True, blocking=not self.initialized)
-
-    def encode(self, data):
-        # Iterate over each data element, tokenize (if necessary) and build an aggregated embeddings vector
-        embeddings = []
-        for tokens in data:
-            # Convert to tokens if necessary
-            if isinstance(tokens, str):
-                tokens = Tokenizer.tokenize(tokens)
-
-            # Generate weights for each vector using a scoring method
-            weights = self.scoring.weights(tokens) if self.scoring else None
-
-            # pylint: disable=E1133
-            if weights and [x for x in weights if x > 0]:
-                # Build weighted average embeddings vector. Create weights array os float32 to match embeddings precision.
-                embedding = np.average(self.lookup(tokens), weights=np.array(weights, dtype=np.float32), axis=0)
-            else:
-                # If no weights, use mean
-                embedding = np.mean(self.lookup(tokens), axis=0)
-
-            embeddings.append(embedding)
-
-        return np.array(embeddings, dtype=np.float32)
-
-    def index(self, documents, batchsize=1):
-        # Use default single process indexing logic
-        if "parallel" in self.config and not self.config["parallel"]:
-            return super().index(documents, batchsize)
-
-        # Customize indexing logic with multiprocessing pool to efficiently build vectors
-        ids, dimensions, stream = [], None, None
-
-        # Shared objects with Pool
-        args = (self.config, self.scoring)
-
-        # Convert all documents to embedding arrays, stream embeddings to disk to control memory usage
-        with Pool(os.cpu_count(), initializer=create, initargs=args) as pool:
-            with tempfile.NamedTemporaryFile(mode="wb", suffix=".npy", delete=False) as output:
-                stream = output.name
-                for uid, embedding in pool.imap(transform, documents):
-                    if not dimensions:
-                        # Set number of dimensions for embeddings
-                        dimensions = embedding.shape[0]
-
-                    ids.append(uid)
-                    pickle.dump(embedding.reshape(1, -1), output, protocol=4)
-
-        return (ids, dimensions, len(ids), stream)
-
-    def lookup(self, tokens):
+    @staticmethod
+    def ismodel(path):
         """
-        Queries word vectors for given list of input tokens.
+        Checks if path is a WordVectors model.
 
         Args:
-            tokens: list of tokens to query
+            path: input path
 
         Returns:
-            word vectors array
+            True if this is a WordVectors model, False otherwise
         """
 
-        return self.model.query(tokens)
+        # Check if this is a SQLite database
+        if WordVectors.isdatabase(path):
+            return True
+
+        try:
+            # Download file and parse JSON
+            path = cached_file(path_or_repo_id=path, filename="config.json")
+            if path:
+                with open(path, encoding="utf-8") as f:
+                    config = json.load(f)
+                    return config.get("model_type") == "staticvectors"
+
+        # Ignore this error - invalid repo or directory
+        except (HFValidationError, OSError):
+            pass
+
+        return False
 
     @staticmethod
     def isdatabase(path):
@@ -143,49 +116,96 @@ class WordVectors(Vectors):
             True if this is a SQLite database
         """
 
-        if isinstance(path, str) and os.path.isfile(path) and os.path.getsize(path) >= 100:
-            # Read 100 byte SQLite header
-            with open(path, "rb") as f:
-                header = f.read(100)
+        return isinstance(path, str) and STATICVECTORS and Database.isdatabase(path)
 
-            # Check for SQLite header
-            return header.startswith(b"SQLite format 3\000")
+    def __init__(self, config, scoring, models):
+        # Check before parent constructor since it calls loadmodel
+        if not STATICVECTORS:
+            raise ImportError('staticvectors is not available - install "vectors" extra to enable')
 
-        return False
+        super().__init__(config, scoring, models)
 
-    @staticmethod
-    def build(data, size, mincount, path):
+    def loadmodel(self, path):
+        return StaticVectors(path)
+
+    def encode(self, data):
+        # Iterate over each data element, tokenize (if necessary) and build an aggregated embeddings vector
+        embeddings = []
+        for tokens in data:
+            # Convert to tokens, if necessary. If tokenized list is empty, use input string.
+            if isinstance(tokens, str):
+                tokenlist = Tokenizer.tokenize(tokens)
+                tokens = tokenlist if tokenlist else [tokens]
+
+            # Generate weights for each vector using a scoring method
+            weights = self.scoring.weights(tokens) if self.scoring else None
+
+            # pylint: disable=E1133
+            if weights and [x for x in weights if x > 0]:
+                # Build weighted average embeddings vector. Create weights array as float32 to match embeddings precision.
+                embedding = np.average(self.lookup(tokens), weights=np.array(weights, dtype=np.float32), axis=0)
+            else:
+                # If no weights, use mean
+                embedding = np.mean(self.lookup(tokens), axis=0)
+
+            embeddings.append(embedding)
+
+        return np.array(embeddings, dtype=np.float32)
+
+    def index(self, documents, batchsize=500, checkpoint=None):
+        # Derive number of parallel processes
+        parallel = self.config.get("parallel", True)
+        parallel = os.cpu_count() if parallel and isinstance(parallel, bool) else int(parallel)
+
+        # Use default single process indexing logic
+        if not parallel:
+            return super().index(documents, batchsize)
+
+        # Customize indexing logic with multiprocessing pool to efficiently build vectors
+        ids, dimensions, batches, stream = [], None, 0, None
+
+        # Shared objects with Pool
+        args = (self.config, self.scoring)
+
+        # Convert all documents to embedding arrays, stream embeddings to disk to control memory usage
+        with Pool(parallel, initializer=create, initargs=args) as pool:
+            with tempfile.NamedTemporaryFile(mode="wb", suffix=".npy", delete=False) as output:
+                stream = output.name
+                embeddings = []
+                for uid, embedding in pool.imap(transform, documents, self.encodebatch):
+                    if not dimensions:
+                        # Set number of dimensions for embeddings
+                        dimensions = embedding.shape[0]
+
+                    ids.append(uid)
+                    embeddings.append(embedding)
+
+                    if len(embeddings) == batchsize:
+                        np.save(output, np.array(embeddings, dtype=np.float32))
+                        batches += 1
+
+                        embeddings = []
+
+                # Final embeddings batch
+                if embeddings:
+                    np.save(output, np.array(embeddings, dtype=np.float32))
+                    batches += 1
+
+        return (ids, dimensions, batches, stream)
+
+    def lookup(self, tokens):
         """
-        Builds fastText vectors from a file.
+        Queries word vectors for given list of input tokens.
 
         Args:
-            data: path to input data file
-            size: number of vector dimensions
-            mincount: minimum number of occurrences required to register a token
-            path: path to output file
+            tokens: list of tokens to query
+
+        Returns:
+            word vectors array
         """
 
-        # Train on data file using largest dimension size
-        model = fasttext.train_unsupervised(data, dim=size, minCount=mincount)
+        return self.model.embeddings(tokens)
 
-        # Output file path
-        print(f"Building {size} dimension model")
-
-        # Output vectors in vec/txt format
-        with open(path + ".txt", "w", encoding="utf-8") as output:
-            words = model.get_words()
-            output.write(f"{len(words)} {model.get_dimension()}\n")
-
-            for word in words:
-                # Skip end of line token
-                if word != "</s>":
-                    vector = model.get_word_vector(word)
-                    data = ""
-                    for v in vector:
-                        data += " " + str(v)
-
-                    output.write(word + data + "\n")
-
-        # Build magnitude vectors database
-        print("Converting vectors to magnitude format")
-        converter.convert(path + ".txt", path + ".magnitude", subword=True)
+    def tokens(self, data):
+        # Skip tokenization rules
+        return data
